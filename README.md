@@ -1,3 +1,5 @@
+![Go Tests](https://github.com/Raditya0902/lsmdb/actions/workflows/test.yml/badge.svg)
+
 # lsmdb
 
 A LevelDB-style LSM-tree key-value store implemented in Go, with a WAL, per-SSTable Bloom filters, size-tiered compaction, and a benchmark harness comparing it to SQLite.

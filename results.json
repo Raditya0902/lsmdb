@@ -1,0 +1,117 @@
+[
+  {
+    "workload": "A: Sequential Writes",
+    "engine": "LSM",
+    "ops_per_sec": 63466.93501840753,
+    "p50_ms": 0.00125,
+    "p95_ms": 0.003833,
+    "p99_ms": 0.02125,
+    "disk_bytes": 957080,
+    "read_amp": 1
+  },
+  {
+    "workload": "B: Random Writes",
+    "engine": "LSM",
+    "ops_per_sec": 107392.2845452225,
+    "p50_ms": 0.001125,
+    "p95_ms": 0.001709,
+    "p99_ms": 0.003667,
+    "disk_bytes": 933098,
+    "read_amp": 3
+  },
+  {
+    "workload": "C: Read-after-Write",
+    "engine": "LSM",
+    "ops_per_sec": 217278.5698342123,
+    "p50_ms": 0.001083,
+    "p95_ms": 0.001292,
+    "p99_ms": 0.002958,
+    "disk_bytes": 478704,
+    "read_amp": 2
+  },
+  {
+    "workload": "D: Point Lookups",
+    "engine": "LSM",
+    "ops_per_sec": 302649.3866779914,
+    "p50_ms": 0.000125,
+    "p95_ms": 0.01075,
+    "p99_ms": 0.011583,
+    "disk_bytes": 478704,
+    "bloom_skips": 6983,
+    "read_amp": 2
+  },
+  {
+    "workload": "E: Update-Heavy",
+    "engine": "LSM",
+    "ops_per_sec": 854413.494264963,
+    "p50_ms": 0.001125,
+    "p95_ms": 0.00125,
+    "p99_ms": 0.002791,
+    "disk_bytes": 508810
+  },
+  {
+    "workload": "F: Delete-Heavy",
+    "engine": "LSM",
+    "ops_per_sec": 312882.63590855146,
+    "p50_ms": 0.001292,
+    "p95_ms": 0.010375,
+    "p99_ms": 0.011292,
+    "disk_bytes": 303708,
+    "bloom_skips": 1980,
+    "read_amp": 1
+  },
+  {
+    "workload": "A: Sequential Writes",
+    "engine": "SQLite",
+    "ops_per_sec": 85094.25686606838,
+    "p50_ms": 0.009417,
+    "p95_ms": 0.015709,
+    "p99_ms": 0.023666,
+    "disk_bytes": 1097728
+  },
+  {
+    "workload": "B: Random Writes",
+    "engine": "SQLite",
+    "ops_per_sec": 80588.87516030537,
+    "p50_ms": 0.009667,
+    "p95_ms": 0.017875,
+    "p99_ms": 0.0255,
+    "disk_bytes": 1032192
+  },
+  {
+    "workload": "C: Read-after-Write",
+    "engine": "SQLite",
+    "ops_per_sec": 129093.29504013105,
+    "p50_ms": 0.008,
+    "p95_ms": 0.013125,
+    "p99_ms": 0.018084,
+    "disk_bytes": 557056
+  },
+  {
+    "workload": "D: Point Lookups",
+    "engine": "SQLite",
+    "ops_per_sec": 375990.7638620839,
+    "p50_ms": 0.002666,
+    "p95_ms": 0.003042,
+    "p99_ms": 0.0035,
+    "disk_bytes": 557056
+  },
+  {
+    "workload": "E: Update-Heavy",
+    "engine": "SQLite",
+    "ops_per_sec": 118311.54797729076,
+    "p50_ms": 0.007459,
+    "p95_ms": 0.009458,
+    "p99_ms": 0.011917,
+    "disk_bytes": 12288
+  },
+  {
+    "workload": "F: Delete-Heavy",
+    "engine": "SQLite",
+    "ops_per_sec": 387536.4855912772,
+    "p50_ms": 0.002583,
+    "p95_ms": 0.002958,
+    "p99_ms": 0.003416,
+    "disk_bytes": 557056
+  }
+]

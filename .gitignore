@@ -1,0 +1,8 @@
+/tmp/
+testdb*/
+*.db
+dev/
+.claude/
+CLAUDE.md
+*.test
+*.out

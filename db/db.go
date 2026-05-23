@@ -1,0 +1,353 @@
+// Package db exposes the public API for the LSM-tree key-value store.
+package db
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"lsmdb/internal/compact"
+	"lsmdb/internal/memtable"
+	"lsmdb/internal/sstable"
+	"lsmdb/internal/wal"
+)
+
+// DB is the handle to an open database instance.
+type DB struct {
+	mu      sync.Mutex
+	mem     *memtable.MemTable
+	log     *wal.WAL          // nil when running in-memory (path == "")
+	path    string            // empty for in-memory DB
+	readers []*sstable.Reader // SSTable readers, newest first
+	nextSST uint64            // sequence number for the next SSTable file
+	opts    *Options
+}
+
+// Open creates or opens a database at path.
+// If path is empty the database is in-memory only — no WAL, no persistence.
+// When path is non-empty the WAL is replayed and existing SSTables are opened
+// before Open returns, restoring the full persisted state.
+func Open(path string, opts *Options) (*DB, error) {
+	if opts == nil {
+		opts = DefaultOptions()
+	}
+	mem := memtable.New()
+	if path == "" {
+		return &DB{mem: mem, opts: opts}, nil
+	}
+
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+
+	readers, nextSST, err := openSSTables(path)
+	if err != nil {
+		return nil, err
+	}
+
+	w, err := wal.Open(filepath.Join(path, "wal"))
+	if err != nil {
+		for _, r := range readers {
+			r.Close() //nolint:errcheck
+		}
+		return nil, fmt.Errorf("open wal: %w", err)
+	}
+
+	records, err := w.ReadAll()
+	if err != nil {
+		w.Close() //nolint:errcheck
+		for _, r := range readers {
+			r.Close() //nolint:errcheck
+		}
+		return nil, fmt.Errorf("replay wal: %w", err)
+	}
+
+	for _, r := range records {
+		// WAL types (1=PUT, 2=DELETE) map to memtable RecordType (0=PUT, 1=DELETE).
+		mem.SetRaw(memtable.Record{
+			Key:    r.Key,
+			Value:  r.Value,
+			SeqNum: r.SeqNum,
+			Type:   memtable.RecordType(r.Type - 1),
+		})
+	}
+
+	return &DB{
+		mem:     mem,
+		log:     w,
+		path:    path,
+		readers: readers,
+		nextSST: nextSST,
+		opts:    opts,
+	}, nil
+}
+
+// Get returns the value stored under key.
+// Returns (nil, false) when the key does not exist or has been deleted.
+// The memtable is checked first; if not found, SSTables are searched newest-first.
+func (db *DB) Get(key string) ([]byte, bool) {
+	// A memtable tombstone beats any older SSTable value.
+	if r, ok := db.mem.GetRecord(key); ok {
+		if r.Type == memtable.RecordTypeDelete {
+			return nil, false
+		}
+		return r.Value, true
+	}
+
+	for _, reader := range db.readers {
+		r, found, err := reader.Get(key)
+		if err != nil || !found {
+			continue
+		}
+		if r.Type == memtable.RecordTypeDelete {
+			return nil, false
+		}
+		return r.Value, true
+	}
+
+	return nil, false
+}
+
+// Set stores value under key, replacing any previous value.
+// The WAL record is written before the memtable is updated.
+// Triggers a flush (and possibly compaction) if the memtable reaches the threshold.
+func (db *DB) Set(key string, value []byte) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	seq := db.mem.AllocSeq()
+	if db.log != nil {
+		if err := db.log.Append(wal.Record{Type: wal.TypePut, SeqNum: seq, Key: key, Value: value}); err != nil {
+			return fmt.Errorf("wal append: %w", err)
+		}
+	}
+	db.mem.SetRaw(memtable.Record{Key: key, Value: value, SeqNum: seq, Type: memtable.RecordTypePut})
+
+	return db.maybeFlush()
+}
+
+// Delete removes key from the database by writing a tombstone.
+// The WAL record is written before the memtable is updated.
+// Triggers a flush (and possibly compaction) if the memtable reaches the threshold.
+func (db *DB) Delete(key string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	seq := db.mem.AllocSeq()
+	if db.log != nil {
+		if err := db.log.Append(wal.Record{Type: wal.TypeDelete, SeqNum: seq, Key: key}); err != nil {
+			return fmt.Errorf("wal append: %w", err)
+		}
+	}
+	db.mem.SetRaw(memtable.Record{Key: key, SeqNum: seq, Type: memtable.RecordTypeDelete})
+
+	return db.maybeFlush()
+}
+
+// SSTableCount returns the number of SSTable files currently open.
+// Intended for testing and diagnostics.
+func (db *DB) SSTableCount() int {
+	return len(db.readers)
+}
+
+// BloomSkips returns the total number of times any SSTable's bloom filter
+// returned false during a Get, saving a disk scan.
+// Intended for testing and diagnostics.
+func (db *DB) BloomSkips() int64 {
+	var total int64
+	for _, r := range db.readers {
+		total += r.BloomSkips()
+	}
+	return total
+}
+
+// ForceFlush flushes the current memtable to an SSTable regardless of the flush
+// threshold. A no-op when the memtable is empty or the DB is in-memory mode.
+// Intended for testing.
+func (db *DB) ForceFlush() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.flush()
+}
+
+// ForceCompact compacts all current SSTables into one regardless of the
+// compaction threshold. A no-op when there are no SSTables.
+// Intended for testing.
+func (db *DB) ForceCompact() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.compact()
+}
+
+// Close syncs the WAL to disk and releases all file descriptors.
+func (db *DB) Close() error {
+	var firstErr error
+	for _, r := range db.readers {
+		if err := r.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if db.log != nil {
+		if err := db.log.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// ── internal write path ────────────────────────────────────────────────────
+
+// maybeFlush flushes the memtable if the flush threshold is reached.
+// Must be called with db.mu held.
+func (db *DB) maybeFlush() error {
+	if db.path == "" {
+		return nil
+	}
+	if db.mem.Size() < db.opts.flushThreshold() {
+		return nil
+	}
+	return db.flush()
+}
+
+// flush writes the current memtable to a new SSTable, resets the memtable,
+// rotates the WAL, then triggers compaction if the threshold is met.
+// Must be called with db.mu held.
+func (db *DB) flush() error {
+	records := db.mem.SortedEntries()
+	if len(records) == 0 {
+		return nil
+	}
+
+	db.nextSST++
+	sstPath := filepath.Join(db.path, fmt.Sprintf("%06d.sst", db.nextSST))
+
+	if err := sstable.Write(sstPath, records); err != nil {
+		db.nextSST--
+		return fmt.Errorf("flush sstable: %w", err)
+	}
+
+	r, err := sstable.Open(sstPath)
+	if err != nil {
+		return fmt.Errorf("open flushed sstable: %w", err)
+	}
+
+	db.readers = append([]*sstable.Reader{r}, db.readers...)
+	db.mem = memtable.NewWithSeq(db.mem.NextSeq())
+
+	if db.log != nil {
+		if err := db.log.Reset(); err != nil {
+			return fmt.Errorf("rotate wal: %w", err)
+		}
+	}
+
+	return db.maybeCompact()
+}
+
+// maybeCompact runs compaction if the SSTable count meets the threshold.
+// Must be called with db.mu held.
+func (db *DB) maybeCompact() error {
+	if len(db.readers) < db.opts.compactionThreshold() {
+		return nil
+	}
+	return db.compact()
+}
+
+// compact merges all current SSTables into a single new one.
+// Because we always compact the full set, this is always a bottom-level
+// compaction and tombstones are dropped.
+// Must be called with db.mu held.
+func (db *DB) compact() error {
+	if len(db.readers) == 0 {
+		return nil
+	}
+
+	db.nextSST++
+	outPath := filepath.Join(db.path, fmt.Sprintf("%06d.sst", db.nextSST))
+
+	// Collect stats and old file paths before we close the readers.
+	filesIn := len(db.readers)
+	recordsIn := int64(0)
+	for _, r := range db.readers {
+		recordsIn += r.RecordCount()
+	}
+	oldPaths := make([]string, filesIn)
+	for i, r := range db.readers {
+		oldPaths[i] = r.Path()
+	}
+
+	recordsOut, err := compact.Compact(db.readers, outPath, true)
+	if err != nil {
+		db.nextSST--
+		return fmt.Errorf("compact: %w", err)
+	}
+
+	// Open the new reader only if the output file was actually created.
+	var newReaders []*sstable.Reader
+	if recordsOut > 0 {
+		nr, err := sstable.Open(outPath)
+		if err != nil {
+			return fmt.Errorf("open compacted sstable: %w", err)
+		}
+		newReaders = []*sstable.Reader{nr}
+	} else {
+		// All records were tombstones — no output file. Roll back the sequence number.
+		db.nextSST--
+	}
+
+	// Close old readers then delete their files.
+	for _, r := range db.readers {
+		r.Close() //nolint:errcheck
+	}
+	for _, p := range oldPaths {
+		os.Remove(p) //nolint:errcheck
+	}
+
+	db.readers = newReaders
+
+	log.Printf("[compact] %d files, %d records in → %d records out (%s)",
+		filesIn, recordsIn, recordsOut, filepath.Base(outPath))
+
+	return nil
+}
+
+// ── startup helpers ────────────────────────────────────────────────────────
+
+// openSSTables scans path for *.sst files, opens them newest-first, and returns
+// the reader slice plus the sequence number of the newest file found.
+func openSSTables(path string) ([]*sstable.Reader, uint64, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read db dir: %w", err)
+	}
+
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sst") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names) // lexicographic == numeric for zero-padded names
+
+	readers := make([]*sstable.Reader, 0, len(names))
+	for i := len(names) - 1; i >= 0; i-- {
+		r, err := sstable.Open(filepath.Join(path, names[i]))
+		if err != nil {
+			for _, opened := range readers {
+				opened.Close() //nolint:errcheck
+			}
+			return nil, 0, fmt.Errorf("open sstable %s: %w", names[i], err)
+		}
+		readers = append(readers, r)
+	}
+
+	var nextSST uint64
+	if len(names) > 0 {
+		fmt.Sscanf(names[len(names)-1], "%d.sst", &nextSST)
+	}
+
+	return readers, nextSST, nil
+}

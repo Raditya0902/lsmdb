@@ -25,6 +25,12 @@ val, ok := d.Get("hello")  // val = []byte("world"), ok = true
 d.Delete("hello")
 
 val, ok = d.Get("hello")   // val = nil, ok = false
+
+// Range scan (returns all live keys where "hello" <= key <= "world")
+pairs, err := d.Scan("hello", "world")
+for _, kv := range pairs {
+    fmt.Println(kv.Key, kv.Value)
+}
 ```
 
 Pass `""` as the path for an in-memory-only database with no WAL and no persistence.
@@ -84,14 +90,14 @@ Get(key)
 
 ## Components
 
-| Component | Responsibility | Key file |
-|---|---|---|
-| `MemTable` | In-memory write buffer; holds the most recent record per key | `internal/memtable/memtable.go` |
-| `WAL` | Binary append log with CRC32 per record; replayed on startup for crash recovery | `internal/wal/wal.go` |
-| `SSTable` | Immutable sorted file; data records + metadata + Bloom filter + sparse index + footer | `internal/sstable/` |
-| `BloomFilter` | Probabilistic per-SSTable skip filter; eliminates disk reads for absent keys | `internal/bloom/bloom.go` |
-| `Compactor` | K-way heap merge across all SSTables; drops tombstones at the bottom level | `internal/compact/compactor.go` |
-| `DB` | Public API (`Open`, `Get`, `Set`, `Delete`, `Close`); orchestrates all components | `db/db.go` |
+| Component     | Responsibility                                                                        | Key file                        |
+| ------------- | ------------------------------------------------------------------------------------- | ------------------------------- |
+| `MemTable`    | In-memory write buffer; holds the most recent record per key                          | `internal/memtable/memtable.go` |
+| `WAL`         | Binary append log with CRC32 per record; replayed on startup for crash recovery       | `internal/wal/wal.go`           |
+| `SSTable`     | Immutable sorted file; data records + metadata + Bloom filter + sparse index + footer | `internal/sstable/`             |
+| `BloomFilter` | Probabilistic per-SSTable skip filter; eliminates disk reads for absent keys          | `internal/bloom/bloom.go`       |
+| `Compactor`   | K-way heap merge across all SSTables; drops tombstones at the bottom level            | `internal/compact/compactor.go` |
+| `DB`          | Public API (`Open`, `Get`, `Set`, `Delete`, `Scan`, `Close`); orchestrates all components | `db/db.go`                      |
 
 ---
 
@@ -148,7 +154,6 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 ## Limitations
 
 - **Single writer.** `db.mu` serialises all writes. There is no concurrent write path.
-- **No range scans.** Only point lookups (`Get`) are supported. There is no iterator or `Scan(from, to)` API.
 - **No compression.** Keys and values are written verbatim. There is no snappy/zstd layer.
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
 - **No atomic SSTable replacement.** A crash between writing the new SSTable and deleting the old ones leaves both on disk. On reopen, sequence number ordering produces correct results but the old files are not cleaned up.
@@ -159,7 +164,6 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 ## Future work
 
 - Leveled compaction (L0→L1→L2) to bound read amplification without growing a single large SSTable
-- Iterator / range scan API (`Seek`, `Next`, `Prev`)
 - Block compression (snappy or zstd) for the SSTable data section
 - Manifest file for atomic SSTable replacement and crash-safe compaction
 - Concurrent readers with a read-lock-free SSTable list snapshot

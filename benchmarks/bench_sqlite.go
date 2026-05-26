@@ -6,9 +6,12 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"lsmdb/db"
 )
 
 const sqliteEngine = "SQLite"
@@ -104,9 +107,28 @@ func (s *sqliteDB) batchSet(keys, values [][]byte) error {
 
 func (s *sqliteDB) close() error { return s.db.Close() }
 
-// RunSQLite executes all six standard workloads against SQLite.
+const sqliteRange = `SELECT key, value FROM kv WHERE key >= ? AND key <= ? ORDER BY key`
+
+func (s *sqliteDB) scan(from, to []byte) ([]db.KVPair, error) {
+	rows, err := s.db.Query(sqliteRange, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []db.KVPair
+	for rows.Next() {
+		var k, v []byte
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		result = append(result, db.KVPair{Key: string(k), Value: v})
+	}
+	return result, rows.Err()
+}
+
+// RunSQLite executes all workloads against SQLite.
 func RunSQLite(dir string) ([]WorkloadResult, error) {
-	results := make([]WorkloadResult, 0, 6)
+	results := make([]WorkloadResult, 0, 9)
 
 	for _, w := range []struct {
 		name string
@@ -125,6 +147,22 @@ func RunSQLite(dir string) ([]WorkloadResult, error) {
 		}
 		results = append(results, wl)
 	}
+
+	for _, n := range []int{8, 16, 32} {
+		name := fmt.Sprintf("G(%d): Concurrent Reads", n)
+		wl, err := runSQLiteWorkloadG(dir, name, n)
+		if err != nil {
+			return nil, fmt.Errorf("workload %s: %w", name, err)
+		}
+		results = append(results, wl)
+	}
+
+	wl, err := runSQLiteWorkload(dir, "H: Range Scans", workloadHSQLite)
+	if err != nil {
+		return nil, fmt.Errorf("workload H: %w", err)
+	}
+	results = append(results, wl)
+
 	return results, nil
 }
 
@@ -159,6 +197,43 @@ func runSQLiteWorkload(baseDir, name string, fn func(*sqliteDB) ([]time.Duration
 		totalDur += l
 	}
 	opsPerSec := float64(n) / totalDur.Seconds()
+
+	return WorkloadResult{
+		Workload:  name,
+		Engine:    sqliteEngine,
+		OpsPerSec: opsPerSec,
+		P50Ms:     p50,
+		P95Ms:     p95,
+		P99Ms:     p99,
+		DiskBytes: disk,
+	}, nil
+}
+
+func runSQLiteWorkloadG(baseDir, name string, goroutines int) (WorkloadResult, error) {
+	dir := filepath.Join(baseDir, "sqlite")
+	os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return WorkloadResult{}, err
+	}
+
+	d, err := openSQLite(dir)
+	if err != nil {
+		return WorkloadResult{}, err
+	}
+
+	latencies, wallTime, err := workloadGSQLite(d, goroutines)
+	if err != nil {
+		d.close() //nolint:errcheck
+		return WorkloadResult{}, err
+	}
+
+	if err := d.close(); err != nil {
+		return WorkloadResult{}, err
+	}
+
+	disk := diskUsage(dir)
+	p50, p95, p99 := latencyStats(latencies)
+	opsPerSec := float64(len(latencies)) / wallTime.Seconds()
 
 	return WorkloadResult{
 		Workload:  name,
@@ -288,4 +363,74 @@ func workloadFSQLite(d *sqliteDB) ([]time.Duration, error) {
 		latencies[i] = time.Since(start)
 	}
 	return latencies, nil
+}
+
+// H: 10,000 sequential keys pre-populated, 1,000 range scans of 100-key windows.
+func workloadHSQLite(d *sqliteDB) ([]time.Duration, error) {
+	const (
+		numKeys    = 10_000
+		numScans   = 1_000
+		windowSize = 100
+	)
+	keys := SequentialKeys(numKeys)
+	vals := RandomValues(numKeys, 8, 64)
+	if err := d.batchSet(keys, vals); err != nil {
+		return nil, err
+	}
+	rng := rand.New(rand.NewSource(8))
+	latencies := make([]time.Duration, numScans)
+	for i := range latencies {
+		startIdx := rng.Intn(numKeys - windowSize)
+		t := time.Now()
+		if _, err := d.scan(keys[startIdx], keys[startIdx+windowSize-1]); err != nil {
+			return nil, err
+		}
+		latencies[i] = time.Since(t)
+	}
+	return latencies, nil
+}
+
+// G: pre-populate 10,000 keys via batchSet, then run goroutines concurrent
+// random Gets. SQLite WAL mode allows multiple concurrent readers natively.
+func workloadGSQLite(d *sqliteDB, goroutines int) ([]time.Duration, time.Duration, error) {
+	const (
+		numKeys  = 10_000
+		getsPerG = 1_000
+	)
+
+	keys := SequentialKeys(numKeys)
+	vals := RandomValues(numKeys, 7, 64)
+	if err := d.batchSet(keys, vals); err != nil {
+		return nil, 0, err
+	}
+
+	// Allow enough connections for concurrent readers.
+	d.db.SetMaxOpenConns(goroutines + 1)
+
+	totalOps := goroutines * getsPerG
+	latencies := make([]time.Duration, totalOps)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	start := time.Now()
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(int64(gid*997 + 7)))
+			lats := make([]time.Duration, getsPerG)
+			for i := range lats {
+				key := keys[rng.Intn(numKeys)]
+				t := time.Now()
+				d.get(key)
+				lats[i] = time.Since(t)
+			}
+			mu.Lock()
+			copy(latencies[gid*getsPerG:], lats)
+			mu.Unlock()
+		}(g)
+	}
+	wg.Wait()
+
+	return latencies, time.Since(start), nil
 }

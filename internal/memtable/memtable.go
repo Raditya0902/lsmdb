@@ -136,6 +136,21 @@ func (m *MemTable) GetRecord(key string) (Record, bool) {
 	return r, ok
 }
 
+// ScanRange returns all records where from <= key <= to, sorted ascending by key.
+// Includes tombstones — callers must filter RecordTypeDelete if needed.
+func (m *MemTable) ScanRange(from, to string) []Record {
+	all := m.SortedEntries()
+	start := sort.Search(len(all), func(i int) bool { return all[i].Key >= from })
+	var out []Record
+	for _, r := range all[start:] {
+		if r.Key > to {
+			break
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // SortedEntries returns all records sorted ascending by key.
 // Used by the SSTable writer to flush a sorted run to disk.
 func (m *MemTable) SortedEntries() []Record {

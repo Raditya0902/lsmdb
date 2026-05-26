@@ -159,6 +159,54 @@ func (r *Reader) Get(key string) (memtable.Record, bool, error) {
 	return best, found, nil
 }
 
+// Scan returns all records where from <= key <= to, with the highest seqNum
+// per key. Includes tombstones — callers must filter RecordTypeDelete if needed.
+// Returns nil without error when the SSTable's range does not overlap [from, to].
+func (r *Reader) Scan(from, to string) ([]memtable.Record, error) {
+	if to < r.minKey || from > r.maxKey {
+		return nil, nil
+	}
+
+	// Binary-search sparse index for largest entry with key <= from (same as Get).
+	startOffset := int64(0)
+	if len(r.index) > 0 {
+		i := sort.Search(len(r.index), func(i int) bool {
+			return r.index[i].key > from
+		}) - 1
+		if i >= 0 {
+			startOffset = r.index[i].offset
+		}
+	}
+
+	byKey := make(map[string]memtable.Record)
+	pos := startOffset
+	for pos < r.metaOffset {
+		rec, size, err := r.readRecordAt(pos)
+		if err != nil {
+			return nil, err
+		}
+		pos += size
+		if rec.Key > to {
+			break
+		}
+		if rec.Key < from {
+			continue // sparse index may land before from
+		}
+		if existing, ok := byKey[rec.Key]; !ok || rec.SeqNum > existing.SeqNum {
+			byKey[rec.Key] = rec
+		}
+	}
+
+	results := make([]memtable.Record, 0, len(byKey))
+	for _, rec := range byKey {
+		results = append(results, rec)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Key < results[j].Key
+	})
+	return results, nil
+}
+
 // LoadAll returns every record in the data section, in sorted key order.
 // Used for compaction and testing.
 func (r *Reader) LoadAll() ([]memtable.Record, error) {

@@ -16,9 +16,15 @@ import (
 	"lsmdb/internal/wal"
 )
 
+// KVPair is a live key-value pair returned by Scan.
+type KVPair struct {
+	Key   string
+	Value []byte
+}
+
 // DB is the handle to an open database instance.
 type DB struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	mem     *memtable.MemTable
 	log     *wal.WAL          // nil when running in-memory (path == "")
 	path    string            // empty for in-memory DB
@@ -146,6 +152,44 @@ func (db *DB) Delete(key string) error {
 	db.mem.SetRaw(memtable.Record{Key: key, SeqNum: seq, Type: memtable.RecordTypeDelete})
 
 	return db.maybeFlush()
+}
+
+// Scan returns all live key-value pairs where from <= key <= to, sorted ascending.
+// Tombstoned keys are excluded. Results merge the MemTable with all SSTables;
+// the highest sequence number wins per key.
+func (db *DB) Scan(from, to string) ([]KVPair, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	memRecs := db.mem.ScanRange(from, to)
+	all := make([]memtable.Record, 0, len(memRecs))
+	all = append(all, memRecs...)
+
+	for _, r := range db.readers {
+		recs, err := r.Scan(from, to)
+		if err != nil {
+			return nil, fmt.Errorf("scan sstable: %w", err)
+		}
+		all = append(all, recs...)
+	}
+
+	byKey := make(map[string]memtable.Record, len(all))
+	for _, rec := range all {
+		if existing, ok := byKey[rec.Key]; !ok || rec.SeqNum > existing.SeqNum {
+			byKey[rec.Key] = rec
+		}
+	}
+
+	pairs := make([]KVPair, 0, len(byKey))
+	for key, rec := range byKey {
+		if rec.Type == memtable.RecordTypePut {
+			pairs = append(pairs, KVPair{Key: key, Value: rec.Value})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].Key < pairs[j].Key
+	})
+	return pairs, nil
 }
 
 // SSTableCount returns the number of SSTable files currently open.

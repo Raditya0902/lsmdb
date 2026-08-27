@@ -155,8 +155,9 @@ func StartNode(config NodeConfig) (*Node, error) {
 		metrics: metrics,
 		server: grpc.NewServer(
 			grpc.UnaryInterceptor(metrics.unaryInterceptor),
-			grpc.MaxRecvMsgSize(260<<20),
-			grpc.MaxSendMsgSize(260<<20),
+			grpc.StreamInterceptor(metrics.streamInterceptor),
+			grpc.MaxRecvMsgSize(kvstate.MaxValueBytes+64*1024),
+			grpc.MaxSendMsgSize(kvstate.MaxValueBytes+64*1024),
 		),
 		listener: listener,
 	}
@@ -305,23 +306,30 @@ func (h *handler) Status(ctx context.Context, _ *lsmdbv1.StatusRequest) (*lsmdbv
 }
 
 func (h *handler) Send(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmdbv1.RaftAck, error) {
-	return h.handleRaftMessage(ctx, request, false)
+	return h.handleRaftMessage(ctx, request)
 }
 
-func (h *handler) InstallSnapshot(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmdbv1.RaftAck, error) {
-	return h.handleRaftMessage(ctx, request, true)
+func (h *handler) InstallSnapshot(stream grpc.ClientStreamingServer[lsmdbv1.SnapshotChunk, lsmdbv1.RaftAck]) error {
+	message, err := raftgrpc.ReceiveSnapshot(stream)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if message.To != h.node.config.ID {
+		return status.Errorf(codes.InvalidArgument, "snapshot addressed to node %d", message.To)
+	}
+	if err := h.node.runtime.Step(stream.Context(), message); err != nil {
+		return h.node.rpcError(err)
+	}
+	return stream.SendAndClose(&lsmdbv1.RaftAck{})
 }
 
-func (h *handler) handleRaftMessage(ctx context.Context, request *lsmdbv1.RaftMessage, requireSnapshot bool) (*lsmdbv1.RaftAck, error) {
+func (h *handler) handleRaftMessage(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmdbv1.RaftAck, error) {
 	message, err := raftgrpc.FromProto(request)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if message.To != h.node.config.ID {
 		return nil, status.Errorf(codes.InvalidArgument, "message addressed to node %d", message.To)
-	}
-	if requireSnapshot && message.Type != raft.MsgSnapshot {
-		return nil, status.Error(codes.InvalidArgument, "InstallSnapshot requires a snapshot message")
 	}
 	if err := h.node.runtime.Step(ctx, message); err != nil {
 		return nil, h.node.rpcError(err)

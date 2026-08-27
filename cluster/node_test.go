@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -155,8 +156,13 @@ func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	var lastIndex uint64
+	wantValue := bytes.Repeat([]byte("z"), (1<<20)+123)
 	for i := 1; i <= 8; i++ {
-		result, err := client.Put(ctx, []byte("snapshot-key"), []byte(fmt.Sprintf("value-%d", i)))
+		value := []byte(fmt.Sprintf("value-%d", i))
+		if i == 8 {
+			value = wantValue
+		}
+		result, err := client.Put(ctx, []byte("snapshot-key"), value)
 		if err != nil {
 			t.Fatalf("Put(%d): %v", i, err)
 		}
@@ -186,7 +192,7 @@ func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
 	for time.Now().Before(deadline) {
 		status, statusErr := restarted.Status(ctx)
 		value, found, readErr := restarted.machine.Get([]byte("snapshot-key"))
-		if statusErr == nil && readErr == nil && found && string(value) == "value-8" && status.SnapshotIndex >= lastIndex && restarted.machine.AppliedIndex() >= lastIndex {
+		if statusErr == nil && readErr == nil && found && bytes.Equal(value, wantValue) && status.SnapshotIndex >= lastIndex && restarted.machine.AppliedIndex() >= lastIndex {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

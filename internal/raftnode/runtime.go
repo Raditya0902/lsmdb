@@ -361,7 +361,11 @@ func (r *Runtime) sendLoop() {
 		// Independent peer RPCs must not head-of-line block quorum traffic when one
 		// destination is partitioned. Raft tolerates delayed/reordered messages.
 		go func(message raft.Message) {
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			timeout := 500 * time.Millisecond
+			if message.Type == raft.MsgSnapshot {
+				timeout = 30 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			_ = r.transport.Send(ctx, message)
 		}(message)

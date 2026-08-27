@@ -30,6 +30,9 @@ buildable and tested.
    persist CRC-protected snapshot metadata/data, compact the durable Raft prefix,
    install snapshots on lagging followers, and recover across interrupted
    snapshot/log publication.
+9. **Streamed snapshot transport** — keep snapshot semantics inside Raft while
+   adapting each snapshot message to ordered, checksummed gRPC chunks. Reject
+   partial, inconsistent, and oversized streams before they reach consensus.
 
 ## Network Interface
 
@@ -61,5 +64,5 @@ Followers return a typed leader hint. Keys are at most 16 KiB and values at most
 ## Deferred
 
 Five-node deployment, dynamic membership, distributed scans, stale follower
-reads, sharding/multi-Raft, streamed snapshots larger than 256 MiB, TLS,
+reads, sharding/multi-Raft, disk-streamed snapshots larger than 256 MiB, TLS,
 authentication, and rolling upgrades follow the MVP.

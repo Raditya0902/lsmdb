@@ -70,6 +70,14 @@ func (m *nodeMetrics) unaryInterceptor(ctx context.Context, request any, info *g
 	return response, err
 }
 
+func (m *nodeMetrics) streamInterceptor(server any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	start := time.Now()
+	err := handler(server, stream)
+	m.rpcDuration.WithLabelValues(info.FullMethod).Observe(time.Since(start).Seconds())
+	m.rpcRequests.WithLabelValues(info.FullMethod, status.Code(err).String()).Inc()
+	return err
+}
+
 func (m *nodeMetrics) serve(address string) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))

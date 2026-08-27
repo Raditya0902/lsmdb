@@ -244,7 +244,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RaftClient interface {
 	Send(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftAck, error)
-	InstallSnapshot(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftAck, error)
+	InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftAck], error)
 }
 
 type raftClient struct {
@@ -265,22 +265,25 @@ func (c *raftClient) Send(ctx context.Context, in *RaftMessage, opts ...grpc.Cal
 	return out, nil
 }
 
-func (c *raftClient) InstallSnapshot(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftAck, error) {
+func (c *raftClient) InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftAck], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RaftAck)
-	err := c.cc.Invoke(ctx, Raft_InstallSnapshot_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Raft_ServiceDesc.Streams[0], Raft_InstallSnapshot_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[SnapshotChunk, RaftAck]{ClientStream: stream}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Raft_InstallSnapshotClient = grpc.ClientStreamingClient[SnapshotChunk, RaftAck]
 
 // RaftServer is the server API for Raft service.
 // All implementations must embed UnimplementedRaftServer
 // for forward compatibility.
 type RaftServer interface {
 	Send(context.Context, *RaftMessage) (*RaftAck, error)
-	InstallSnapshot(context.Context, *RaftMessage) (*RaftAck, error)
+	InstallSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftAck]) error
 	mustEmbedUnimplementedRaftServer()
 }
 
@@ -294,8 +297,8 @@ type UnimplementedRaftServer struct{}
 func (UnimplementedRaftServer) Send(context.Context, *RaftMessage) (*RaftAck, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Send not implemented")
 }
-func (UnimplementedRaftServer) InstallSnapshot(context.Context, *RaftMessage) (*RaftAck, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method InstallSnapshot not implemented")
+func (UnimplementedRaftServer) InstallSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftAck]) error {
+	return status.Errorf(codes.Unimplemented, "method InstallSnapshot not implemented")
 }
 func (UnimplementedRaftServer) mustEmbedUnimplementedRaftServer() {}
 func (UnimplementedRaftServer) testEmbeddedByValue()              {}
@@ -336,23 +339,12 @@ func _Raft_Send_Handler(srv interface{}, ctx context.Context, dec func(interface
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Raft_InstallSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RaftMessage)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RaftServer).InstallSnapshot(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Raft_InstallSnapshot_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RaftServer).InstallSnapshot(ctx, req.(*RaftMessage))
-	}
-	return interceptor(ctx, in, info, handler)
+func _Raft_InstallSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RaftServer).InstallSnapshot(&grpc.GenericServerStream[SnapshotChunk, RaftAck]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Raft_InstallSnapshotServer = grpc.ClientStreamingServer[SnapshotChunk, RaftAck]
 
 // Raft_ServiceDesc is the grpc.ServiceDesc for Raft service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -365,11 +357,13 @@ var Raft_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Send",
 			Handler:    _Raft_Send_Handler,
 		},
+	},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "InstallSnapshot",
-			Handler:    _Raft_InstallSnapshot_Handler,
+			StreamName:    "InstallSnapshot",
+			Handler:       _Raft_InstallSnapshot_Handler,
+			ClientStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "api/lsmdb/v1/lsmdb.proto",
 }

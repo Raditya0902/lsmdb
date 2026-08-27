@@ -19,7 +19,7 @@ service KV {
 
 service Raft {
   rpc Send(RaftMessage) returns (RaftAck);
-  rpc InstallSnapshot(RaftMessage) returns (RaftAck);
+  rpc InstallSnapshot(stream SnapshotChunk) returns (RaftAck);
 }
 
 message PutRequest {
@@ -82,6 +82,7 @@ message LogEntry {
 }
 
 message RaftMessage {
+  reserved 12 to 14;
   uint32 type = 1;
   uint64 from = 2;
   uint64 to = 3;
@@ -93,12 +94,21 @@ message RaftMessage {
   bool reject = 9;
   uint64 reject_hint = 10;
   uint64 context = 11;
-  uint64 snapshot_index = 12;
-  uint64 snapshot_term = 13;
-  bytes snapshot_data = 14;
 }
 
 message RaftAck {}
+
+message SnapshotChunk {
+  uint64 from = 1;
+  uint64 to = 2;
+  uint64 raft_term = 3;
+  uint64 snapshot_index = 4;
+  uint64 snapshot_term = 5;
+  uint64 offset = 6;
+  uint64 total_size = 7;
+  uint32 checksum = 8;
+  bytes data = 9;
+}
 
 // Command is the deterministic payload stored in the Raft log.
 message Command {

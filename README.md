@@ -226,7 +226,9 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
 - **No fsync per WAL append.** Only `Close()` fsyncs the WAL. Writes between the last flush and a power failure can be lost.
 - **Static cluster membership.** The distributed MVP requires the same fixed peer map on every node; joint-consensus membership changes are deferred.
-- **Bounded snapshot transfer.** Snapshot installation currently uses one gRPC message and rejects images larger than 256 MiB; chunked streaming is deferred.
+- **In-memory snapshot images.** Snapshot installation streams ordered 1 MiB
+  chunks with a whole-image checksum, but creation and reassembly remain bounded
+  to a 256 MiB in-memory image.
 - **Point operations only over gRPC.** Distributed scans, transactions, and follower-stale reads are not exposed.
 - **Development security model.** The demo cluster uses plaintext gRPC with no authentication or rolling-upgrade protocol.
 

@@ -64,6 +64,14 @@ new SSTable generation through the manifest, then resumes AppendEntries at the
 next index. This keeps snapshot format independent of host paths and obsolete
 SSTable generations while preserving retry deduplication across recovery.
 
+### D012 — Snapshot chunking belongs in the gRPC adapter
+
+The deterministic core and runtime continue exchanging one logical snapshot
+message. The production gRPC adapter streams that image in ordered chunks with a
+declared total length and whole-image CRC. The receiver validates and reassembles
+the complete bounded image before calling the runtime, so network framing does
+not enlarge the consensus interface or affect in-memory fault tests.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

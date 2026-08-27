@@ -343,6 +343,12 @@ installation, and resumes normal append replication at the next index. Startup
 restores a durable snapshot newer than the LSM manifest watermark before opening
 the consensus core.
 
+The gRPC adapter divides each logical snapshot message into ordered 1 MiB chunks.
+Every chunk repeats immutable transfer metadata, and the receiver verifies exact
+offsets, declared length, and a whole-image CRC before delivering the snapshot to
+the runtime. Interrupted or inconsistent streams therefore cannot publish partial
+state. Only one snapshot stream per peer may be in flight.
+
 ### Election and partition behavior
 
 - Randomized election timeouts begin with pre-vote, which does not increment term.
@@ -380,7 +386,8 @@ linearizable read.
 - **No distributed range scans.** Embedded range scans exist, but the network
   interface intentionally exposes only point operations in the MVP.
 - **No compression.** All bytes are stored verbatim.
-- **Bounded snapshot transfer.** Snapshot images are sent as one gRPC message and
-  are capped at 256 MiB; chunked streaming is not yet implemented.
+- **In-memory snapshot images.** Transfer is chunked, but snapshot creation and
+  receive-side reassembly are capped at 256 MiB rather than streamed through a
+  temporary file.
 - **Static membership and plaintext transport.** Dynamic membership, TLS, authentication,
   and rolling upgrades are deferred.

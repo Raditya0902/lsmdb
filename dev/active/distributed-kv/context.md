@@ -69,10 +69,11 @@ sequence as one externally indexed batch, making retries deterministic.
 The MVP uses fixed three-node membership, plaintext local networking, single-key
 operations, and leader-served point reads. It does not include transactions,
 distributed scans, authentication, rolling upgrades, or dynamic membership.
-Snapshot transfer is bounded to 256 MiB per image in this release.
+Snapshot transfer uses ordered 1 MiB gRPC chunks, while creation and receive-side
+reassembly remain bounded to a 256 MiB in-memory image.
 
 ## Deferred Evolution
 
-Next: chunked snapshot streaming, a five-node profile, joint-consensus
+Next: disk-streamed snapshot images beyond 256 MiB, a five-node profile, joint-consensus
 membership, optional stale follower reads, sharding/multi-Raft, TLS, and
 production operations.

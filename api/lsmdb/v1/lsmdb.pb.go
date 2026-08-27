@@ -67,7 +67,7 @@ func (x Command_Operation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Command_Operation.Descriptor instead.
 func (Command_Operation) EnumDescriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{12, 0}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{13, 0}
 }
 
 type PutRequest struct {
@@ -676,9 +676,6 @@ type RaftMessage struct {
 	Reject        bool                   `protobuf:"varint,9,opt,name=reject,proto3" json:"reject,omitempty"`
 	RejectHint    uint64                 `protobuf:"varint,10,opt,name=reject_hint,json=rejectHint,proto3" json:"reject_hint,omitempty"`
 	Context       uint64                 `protobuf:"varint,11,opt,name=context,proto3" json:"context,omitempty"`
-	SnapshotIndex uint64                 `protobuf:"varint,12,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
-	SnapshotTerm  uint64                 `protobuf:"varint,13,opt,name=snapshot_term,json=snapshotTerm,proto3" json:"snapshot_term,omitempty"`
-	SnapshotData  []byte                 `protobuf:"bytes,14,opt,name=snapshot_data,json=snapshotData,proto3" json:"snapshot_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -790,27 +787,6 @@ func (x *RaftMessage) GetContext() uint64 {
 	return 0
 }
 
-func (x *RaftMessage) GetSnapshotIndex() uint64 {
-	if x != nil {
-		return x.SnapshotIndex
-	}
-	return 0
-}
-
-func (x *RaftMessage) GetSnapshotTerm() uint64 {
-	if x != nil {
-		return x.SnapshotTerm
-	}
-	return 0
-}
-
-func (x *RaftMessage) GetSnapshotData() []byte {
-	if x != nil {
-		return x.SnapshotData
-	}
-	return nil
-}
-
 type RaftAck struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -847,6 +823,114 @@ func (*RaftAck) Descriptor() ([]byte, []int) {
 	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{11}
 }
 
+type SnapshotChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	From          uint64                 `protobuf:"varint,1,opt,name=from,proto3" json:"from,omitempty"`
+	To            uint64                 `protobuf:"varint,2,opt,name=to,proto3" json:"to,omitempty"`
+	RaftTerm      uint64                 `protobuf:"varint,3,opt,name=raft_term,json=raftTerm,proto3" json:"raft_term,omitempty"`
+	SnapshotIndex uint64                 `protobuf:"varint,4,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	SnapshotTerm  uint64                 `protobuf:"varint,5,opt,name=snapshot_term,json=snapshotTerm,proto3" json:"snapshot_term,omitempty"`
+	Offset        uint64                 `protobuf:"varint,6,opt,name=offset,proto3" json:"offset,omitempty"`
+	TotalSize     uint64                 `protobuf:"varint,7,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
+	Checksum      uint32                 `protobuf:"varint,8,opt,name=checksum,proto3" json:"checksum,omitempty"`
+	Data          []byte                 `protobuf:"bytes,9,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotChunk) Reset() {
+	*x = SnapshotChunk{}
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotChunk) ProtoMessage() {}
+
+func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
+func (*SnapshotChunk) Descriptor() ([]byte, []int) {
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *SnapshotChunk) GetFrom() uint64 {
+	if x != nil {
+		return x.From
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetTo() uint64 {
+	if x != nil {
+		return x.To
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetRaftTerm() uint64 {
+	if x != nil {
+		return x.RaftTerm
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetSnapshotTerm() uint64 {
+	if x != nil {
+		return x.SnapshotTerm
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetTotalSize() uint64 {
+	if x != nil {
+		return x.TotalSize
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetChecksum() uint32 {
+	if x != nil {
+		return x.Checksum
+	}
+	return 0
+}
+
+func (x *SnapshotChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 // Command is the deterministic payload stored in the Raft log.
 type Command struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -861,7 +945,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -873,7 +957,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -886,7 +970,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{12}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Command) GetOperation() Command_Operation {
@@ -972,7 +1056,7 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\bLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\xa8\x03\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\xbd\x02\n" +
 	"\vRaftMessage\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\rR\x04type\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\x04R\x04from\x12\x0e\n" +
@@ -986,11 +1070,19 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\vreject_hint\x18\n" +
 	" \x01(\x04R\n" +
 	"rejectHint\x12\x18\n" +
-	"\acontext\x18\v \x01(\x04R\acontext\x12%\n" +
-	"\x0esnapshot_index\x18\f \x01(\x04R\rsnapshotIndex\x12#\n" +
-	"\rsnapshot_term\x18\r \x01(\x04R\fsnapshotTerm\x12#\n" +
-	"\rsnapshot_data\x18\x0e \x01(\fR\fsnapshotData\"\t\n" +
-	"\aRaftAck\"\xf4\x01\n" +
+	"\acontext\x18\v \x01(\x04R\acontextJ\x04\b\f\x10\x0f\"\t\n" +
+	"\aRaftAck\"\x83\x02\n" +
+	"\rSnapshotChunk\x12\x12\n" +
+	"\x04from\x18\x01 \x01(\x04R\x04from\x12\x0e\n" +
+	"\x02to\x18\x02 \x01(\x04R\x02to\x12\x1b\n" +
+	"\traft_term\x18\x03 \x01(\x04R\braftTerm\x12%\n" +
+	"\x0esnapshot_index\x18\x04 \x01(\x04R\rsnapshotIndex\x12#\n" +
+	"\rsnapshot_term\x18\x05 \x01(\x04R\fsnapshotTerm\x12\x16\n" +
+	"\x06offset\x18\x06 \x01(\x04R\x06offset\x12\x1d\n" +
+	"\n" +
+	"total_size\x18\a \x01(\x04R\ttotalSize\x12\x1a\n" +
+	"\bchecksum\x18\b \x01(\rR\bchecksum\x12\x12\n" +
+	"\x04data\x18\t \x01(\fR\x04data\"\xf4\x01\n" +
 	"\aCommand\x129\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x1b.lsmdb.v1.Command.OperationR\toperation\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12\x14\n" +
@@ -1006,10 +1098,10 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\x03Put\x12\x14.lsmdb.v1.PutRequest\x1a\x17.lsmdb.v1.WriteResponse\x12:\n" +
 	"\x06Delete\x12\x17.lsmdb.v1.DeleteRequest\x1a\x17.lsmdb.v1.WriteResponse\x122\n" +
 	"\x03Get\x12\x14.lsmdb.v1.GetRequest\x1a\x15.lsmdb.v1.GetResponse\x12;\n" +
-	"\x06Status\x12\x17.lsmdb.v1.StatusRequest\x1a\x18.lsmdb.v1.StatusResponse2u\n" +
+	"\x06Status\x12\x17.lsmdb.v1.StatusRequest\x1a\x18.lsmdb.v1.StatusResponse2y\n" +
 	"\x04Raft\x120\n" +
-	"\x04Send\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAck\x12;\n" +
-	"\x0fInstallSnapshot\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAckB\x1cZ\x1alsmdb/api/lsmdb/v1;lsmdbv1b\x06proto3"
+	"\x04Send\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAck\x12?\n" +
+	"\x0fInstallSnapshot\x12\x17.lsmdb.v1.SnapshotChunk\x1a\x11.lsmdb.v1.RaftAck(\x01B\x1cZ\x1alsmdb/api/lsmdb/v1;lsmdbv1b\x06proto3"
 
 var (
 	file_api_lsmdb_v1_lsmdb_proto_rawDescOnce sync.Once
@@ -1024,7 +1116,7 @@ func file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP() []byte {
 }
 
 var file_api_lsmdb_v1_lsmdb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_api_lsmdb_v1_lsmdb_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_api_lsmdb_v1_lsmdb_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_api_lsmdb_v1_lsmdb_proto_goTypes = []any{
 	(Command_Operation)(0), // 0: lsmdb.v1.Command.Operation
 	(*PutRequest)(nil),     // 1: lsmdb.v1.PutRequest
@@ -1039,7 +1131,8 @@ var file_api_lsmdb_v1_lsmdb_proto_goTypes = []any{
 	(*LogEntry)(nil),       // 10: lsmdb.v1.LogEntry
 	(*RaftMessage)(nil),    // 11: lsmdb.v1.RaftMessage
 	(*RaftAck)(nil),        // 12: lsmdb.v1.RaftAck
-	(*Command)(nil),        // 13: lsmdb.v1.Command
+	(*SnapshotChunk)(nil),  // 13: lsmdb.v1.SnapshotChunk
+	(*Command)(nil),        // 14: lsmdb.v1.Command
 }
 var file_api_lsmdb_v1_lsmdb_proto_depIdxs = []int32{
 	7,  // 0: lsmdb.v1.StatusResponse.peers:type_name -> lsmdb.v1.Peer
@@ -1050,7 +1143,7 @@ var file_api_lsmdb_v1_lsmdb_proto_depIdxs = []int32{
 	4,  // 5: lsmdb.v1.KV.Get:input_type -> lsmdb.v1.GetRequest
 	6,  // 6: lsmdb.v1.KV.Status:input_type -> lsmdb.v1.StatusRequest
 	11, // 7: lsmdb.v1.Raft.Send:input_type -> lsmdb.v1.RaftMessage
-	11, // 8: lsmdb.v1.Raft.InstallSnapshot:input_type -> lsmdb.v1.RaftMessage
+	13, // 8: lsmdb.v1.Raft.InstallSnapshot:input_type -> lsmdb.v1.SnapshotChunk
 	3,  // 9: lsmdb.v1.KV.Put:output_type -> lsmdb.v1.WriteResponse
 	3,  // 10: lsmdb.v1.KV.Delete:output_type -> lsmdb.v1.WriteResponse
 	5,  // 11: lsmdb.v1.KV.Get:output_type -> lsmdb.v1.GetResponse
@@ -1075,7 +1168,7 @@ func file_api_lsmdb_v1_lsmdb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_lsmdb_v1_lsmdb_proto_rawDesc), len(file_api_lsmdb_v1_lsmdb_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

@@ -4,7 +4,7 @@ Last updated: 2026-08-26
 
 ## Current Phase
 
-Raft snapshot and log-compaction milestone complete and verified.
+Streamed `InstallSnapshot` transfer is complete and verified.
 
 ## Completed
 
@@ -35,6 +35,12 @@ Raft snapshot and log-compaction milestone complete and verified.
 - [x] Restore a newer durable Raft snapshot into the LSM state machine on restart.
 - [x] Trigger snapshots after a configurable applied-entry threshold (default 1,000).
 - [x] Expose snapshot index and retained-log length through status and Prometheus.
+- [x] Replace unary snapshot transfer with ordered 1 MiB client-streaming chunks.
+- [x] Validate stream metadata, offsets, total length, and whole-image CRC.
+- [x] Reject interrupted, oversized, or inconsistent streams before Raft delivery.
+- [x] Preserve the transport seam and deterministic Raft message interface.
+- [x] Prevent overlapping outbound snapshot streams to the same peer.
+- [x] Exercise multi-chunk installation in the three-node offline-follower test.
 
 ## In Progress
 
@@ -115,12 +121,19 @@ Raft snapshot and log-compaction milestone complete and verified.
 - 2026-08-26 — post-snapshot `go vet ./...` — PASS.
 - 2026-08-26 — post-snapshot `docker compose config` — PASS.
 - 2026-08-26 — post-snapshot `./scripts/docker-smoke.sh` leader failover/restart — PASS.
+- 2026-08-26 — streamed snapshot validation tests — PASS.
+- 2026-08-26 — multi-chunk offline-follower catch-up, three consecutive runs — PASS.
+- 2026-08-26 — post-streaming `go test ./...` — PASS.
+- 2026-08-26 — post-streaming `go test -race ./...` — PASS.
+- 2026-08-26 — post-streaming `go vet ./...` — PASS.
+- 2026-08-26 — post-streaming `docker compose config` — PASS.
+- 2026-08-26 — post-streaming `./scripts/docker-smoke.sh` — PASS.
 
 ## Blockers
 
-None. Snapshot transfer is currently a single bounded gRPC message (256 MiB maximum);
-chunked streaming is a future scalability improvement, not a correctness blocker.
+None. Snapshot creation and receive-side reassembly remain bounded to a 256 MiB
+in-memory image; transport itself is chunked.
 
 ## Next Task
 
-Add joint-consensus membership changes or streamed snapshot transfer.
+Design and implement joint-consensus membership changes.

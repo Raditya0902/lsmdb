@@ -4,6 +4,7 @@ package raftgrpc
 import (
 	"context"
 	"fmt"
+	"hash/crc32"
 	"sync"
 
 	lsmdbv1 "lsmdb/api/lsmdb/v1"
@@ -15,10 +16,11 @@ import (
 
 // Transport caches one gRPC connection per static peer.
 type Transport struct {
-	mu      sync.Mutex
-	peers   map[uint64]string
-	conns   map[uint64]*grpc.ClientConn
-	clients map[uint64]lsmdbv1.RaftClient
+	mu               sync.Mutex
+	peers            map[uint64]string
+	conns            map[uint64]*grpc.ClientConn
+	clients          map[uint64]lsmdbv1.RaftClient
+	snapshotInFlight map[uint64]bool
 }
 
 func New(peers map[uint64]string) *Transport {
@@ -26,7 +28,7 @@ func New(peers map[uint64]string) *Transport {
 	for id, address := range peers {
 		copy[id] = address
 	}
-	return &Transport{peers: copy, conns: make(map[uint64]*grpc.ClientConn), clients: make(map[uint64]lsmdbv1.RaftClient)}
+	return &Transport{peers: copy, conns: make(map[uint64]*grpc.ClientConn), clients: make(map[uint64]lsmdbv1.RaftClient), snapshotInFlight: make(map[uint64]bool)}
 }
 
 func (t *Transport) Send(ctx context.Context, message raft.Message) error {
@@ -35,11 +37,65 @@ func (t *Transport) Send(ctx context.Context, message raft.Message) error {
 		return err
 	}
 	if message.Type == raft.MsgSnapshot {
-		_, err = client.InstallSnapshot(ctx, ToProto(message))
+		if !t.beginSnapshot(message.To) {
+			return nil
+		}
+		defer t.endSnapshot(message.To)
+		err = sendSnapshot(ctx, client, message)
 	} else {
 		_, err = client.Send(ctx, ToProto(message))
 	}
 	return err
+}
+
+func (t *Transport) beginSnapshot(peer uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.snapshotInFlight[peer] {
+		return false
+	}
+	t.snapshotInFlight[peer] = true
+	return true
+}
+
+func (t *Transport) endSnapshot(peer uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.snapshotInFlight, peer)
+}
+
+func sendSnapshot(ctx context.Context, client lsmdbv1.RaftClient, message raft.Message) error {
+	if message.Snapshot == nil {
+		return fmt.Errorf("snapshot message has no snapshot")
+	}
+	data := message.Snapshot.Data
+	if len(data) > MaxSnapshotBytes {
+		return fmt.Errorf("snapshot exceeds %d bytes", MaxSnapshotBytes)
+	}
+	stream, err := client.InstallSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	checksum := crc32.ChecksumIEEE(data)
+	for offset := 0; offset < len(data) || (len(data) == 0 && offset == 0); offset += SnapshotChunkBytes {
+		end := min(offset+SnapshotChunkBytes, len(data))
+		chunk := &lsmdbv1.SnapshotChunk{
+			From: message.From, To: message.To, RaftTerm: message.Term,
+			SnapshotIndex: message.Snapshot.Index, SnapshotTerm: message.Snapshot.Term,
+			Offset: uint64(offset), TotalSize: uint64(len(data)), Checksum: checksum,
+			Data: append([]byte(nil), data[offset:end]...),
+		}
+		if err := stream.Send(chunk); err != nil {
+			return fmt.Errorf("send snapshot chunk at %d: %w", offset, err)
+		}
+		if len(data) == 0 {
+			break
+		}
+	}
+	if _, err := stream.CloseAndRecv(); err != nil {
+		return fmt.Errorf("finish snapshot stream: %w", err)
+	}
+	return nil
 }
 
 func (t *Transport) Close() error {
@@ -53,6 +109,7 @@ func (t *Transport) Close() error {
 	}
 	t.conns = make(map[uint64]*grpc.ClientConn)
 	t.clients = make(map[uint64]lsmdbv1.RaftClient)
+	t.snapshotInFlight = make(map[uint64]bool)
 	return first
 }
 
@@ -81,18 +138,12 @@ func ToProto(message raft.Message) *lsmdbv1.RaftMessage {
 	for _, entry := range message.Entries {
 		entries = append(entries, &lsmdbv1.LogEntry{Index: entry.Index, Term: entry.Term, Data: entry.Data})
 	}
-	result := &lsmdbv1.RaftMessage{
+	return &lsmdbv1.RaftMessage{
 		Type: uint32(message.Type), From: message.From, To: message.To, Term: message.Term,
 		LogIndex: message.LogIndex, LogTerm: message.LogTerm, Entries: entries,
 		LeaderCommit: message.LeaderCommit, Reject: message.Reject,
 		RejectHint: message.RejectHint, Context: message.Context,
 	}
-	if message.Snapshot != nil {
-		result.SnapshotIndex = message.Snapshot.Index
-		result.SnapshotTerm = message.Snapshot.Term
-		result.SnapshotData = append([]byte(nil), message.Snapshot.Data...)
-	}
-	return result
 }
 
 func FromProto(message *lsmdbv1.RaftMessage) (raft.Message, error) {
@@ -106,14 +157,10 @@ func FromProto(message *lsmdbv1.RaftMessage) (raft.Message, error) {
 		}
 		entries = append(entries, raft.Entry{Index: entry.Index, Term: entry.Term, Data: append([]byte(nil), entry.Data...)})
 	}
-	result := raft.Message{
+	return raft.Message{
 		Type: raft.MessageType(message.Type), From: message.From, To: message.To, Term: message.Term,
 		LogIndex: message.LogIndex, LogTerm: message.LogTerm, Entries: entries,
 		LeaderCommit: message.LeaderCommit, Reject: message.Reject,
 		RejectHint: message.RejectHint, Context: message.Context,
-	}
-	if message.SnapshotIndex != 0 || message.SnapshotTerm != 0 || len(message.SnapshotData) != 0 {
-		result.Snapshot = &raft.Snapshot{Index: message.SnapshotIndex, Term: message.SnapshotTerm, Data: append([]byte(nil), message.SnapshotData...)}
-	}
-	return result, nil
+	}, nil
 }

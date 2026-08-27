@@ -61,9 +61,10 @@ type HardState struct {
 // Snapshot is a durable state-machine image at one committed log position.
 // Data is opaque to the consensus core.
 type Snapshot struct {
-	Index uint64
-	Term  uint64
-	Data  []byte
+	Index      uint64
+	Term       uint64
+	Data       []byte
+	Membership Membership
 }
 
 // Message contains fields shared by vote and append RPCs.
@@ -112,7 +113,8 @@ func (u *Update) merge(other Update) {
 	}
 }
 
-// Config controls logical tick timing. Peers must contain ID.
+// Config controls logical tick timing and the immutable bootstrap voter set.
+// ID may be absent from Peers when this node starts as a non-voting learner.
 type Config struct {
 	ID               uint64
 	Peers            []uint64
@@ -132,7 +134,6 @@ func (c Config) validate() error {
 	if len(c.Peers) == 0 {
 		return errors.New("raft peers must not be empty")
 	}
-	found := false
 	seen := make(map[uint64]struct{}, len(c.Peers))
 	for _, peer := range c.Peers {
 		if peer == 0 {
@@ -142,10 +143,6 @@ func (c Config) validate() error {
 			return fmt.Errorf("duplicate raft peer %d", peer)
 		}
 		seen[peer] = struct{}{}
-		found = found || peer == c.ID
-	}
-	if !found {
-		return errors.New("raft peers must contain local ID")
 	}
 	if c.ElectionTickMin <= 0 || c.ElectionTickMax <= c.ElectionTickMin {
 		return errors.New("invalid election tick range")
@@ -171,6 +168,7 @@ type Status struct {
 	RetainedLogEntries uint64
 	VotedFor           uint64
 	MatchIndex         map[uint64]uint64
+	Membership         Membership
 }
 
 var (
@@ -180,9 +178,14 @@ var (
 	ErrStopped = errors.New("raft node is stopped")
 	// ErrReadNotReady means the leader has not committed an entry in its current term.
 	ErrReadNotReady = errors.New("raft leader is not ready for linearizable reads")
+	// ErrMembershipChangeInProgress prevents overlapping voter changes.
+	ErrMembershipChangeInProgress = errors.New("raft membership change is already in progress")
+	// ErrNoMembershipChange means the requested voter set is already active.
+	ErrNoMembershipChange = errors.New("requested raft membership is already active")
 )
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	snapshot.Data = append([]byte(nil), snapshot.Data...)
+	snapshot.Membership = cloneMembership(snapshot.Membership)
 	return snapshot
 }

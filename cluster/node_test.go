@@ -200,3 +200,99 @@ func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
 	status, _ := restarted.Status(context.Background())
 	t.Fatalf("follower did not install snapshot through %d: status=%+v applied=%d", lastIndex, status, restarted.machine.AppliedIndex())
 }
+
+func TestJointConsensusAddsNodeRestartsItAndRemovesLeader(t *testing.T) {
+	addresses := map[uint64]string{1: freeAddress(t), 2: freeAddress(t), 3: freeAddress(t), 4: freeAddress(t)}
+	initialVoters := []uint64{1, 2, 3}
+	configs := make(map[uint64]NodeConfig)
+	nodes := make(map[uint64]*Node)
+	for id := uint64(1); id <= 4; id++ {
+		configs[id] = NodeConfig{ID: id, ListenAddress: addresses[id], DataDir: fmt.Sprintf("%s/node-%d", t.TempDir(), id), Peers: addresses, Voters: initialVoters, TickInterval: 20 * time.Millisecond, ElectionTickMin: 5, ElectionTickMax: 10, HeartbeatTicks: 1, CheckQuorumTicks: 5, SnapshotThreshold: 100}
+		node, err := StartNode(configs[id])
+		if err != nil {
+			t.Fatalf("StartNode(%d): %v", id, err)
+		}
+		nodes[id] = node
+	}
+	defer func() {
+		for _, node := range nodes {
+			if node != nil {
+				_ = node.Close()
+			}
+		}
+	}()
+	leaderID := waitForLeader(t, nodes, 0)
+	client, err := NewClient([]string{addresses[1], addresses[2], addresses[3], addresses[4]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	change, err := client.ChangeMembership(ctx, []uint64{1, 2, 3, 4})
+	if err != nil {
+		t.Fatalf("add node 4: %v", err)
+	}
+	if change.LogIndex == 0 {
+		t.Fatal("membership response has zero index")
+	}
+	waitMembership := func(id uint64, voters []uint64) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			statusCtx, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			status, statusErr := nodes[id].Status(statusCtx)
+			stop()
+			if statusErr == nil && equalUint64s(status.Membership.Voters, voters) && len(status.Membership.JointVoters) == 0 && status.CommitIndex >= change.LogIndex {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		status, _ := nodes[id].Status(context.Background())
+		t.Fatalf("node %d membership = %+v", id, status)
+	}
+	for id := uint64(1); id <= 4; id++ {
+		waitMembership(id, []uint64{1, 2, 3, 4})
+	}
+
+	if err := nodes[4].Close(); err != nil {
+		t.Fatal(err)
+	}
+	nodes[4] = nil
+	restarted, err := StartNode(configs[4])
+	if err != nil {
+		t.Fatalf("restart node 4: %v", err)
+	}
+	nodes[4] = restarted
+	waitMembership(4, []uint64{1, 2, 3, 4})
+
+	remaining := make([]uint64, 0, 3)
+	for _, id := range []uint64{1, 2, 3, 4} {
+		if id != leaderID {
+			remaining = append(remaining, id)
+		}
+	}
+	change, err = client.ChangeMembership(ctx, remaining)
+	if err != nil {
+		t.Fatalf("remove leader %d: %v", leaderID, err)
+	}
+	newLeader := waitForLeader(t, nodes, leaderID)
+	if newLeader == leaderID {
+		t.Fatal("removed leader remained leader")
+	}
+	if _, err := client.Put(ctx, []byte("after-membership"), []byte("ok")); err != nil {
+		t.Fatalf("write after leader removal: %v", err)
+	}
+}
+
+func equalUint64s(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

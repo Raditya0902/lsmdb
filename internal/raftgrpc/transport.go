@@ -83,7 +83,10 @@ func sendSnapshot(ctx context.Context, client lsmdbv1.RaftClient, message raft.M
 			From: message.From, To: message.To, RaftTerm: message.Term,
 			SnapshotIndex: message.Snapshot.Index, SnapshotTerm: message.Snapshot.Term,
 			Offset: uint64(offset), TotalSize: uint64(len(data)), Checksum: checksum,
-			Data: append([]byte(nil), data[offset:end]...),
+			Data:            append([]byte(nil), data[offset:end]...),
+			Voters:          append([]uint64(nil), message.Snapshot.Membership.Voters...),
+			JointVoters:     append([]uint64(nil), message.Snapshot.Membership.JointVoters...),
+			MembershipIndex: message.Snapshot.Membership.Index,
 		}
 		if err := stream.Send(chunk); err != nil {
 			return fmt.Errorf("send snapshot chunk at %d: %w", offset, err)

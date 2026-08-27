@@ -15,6 +15,7 @@ service KV {
   rpc Delete(DeleteRequest) returns (WriteResponse);
   rpc Get(GetRequest) returns (GetResponse);
   rpc Status(StatusRequest) returns (StatusResponse);
+  rpc ChangeMembership(ChangeMembershipRequest) returns (ChangeMembershipResponse);
 }
 
 service Raft {
@@ -67,7 +68,12 @@ message StatusResponse {
   repeated Peer peers = 7;
   uint64 snapshot_index = 8;
   uint64 retained_log_entries = 9;
+  repeated uint64 voter_ids = 10;
+  repeated uint64 joint_voter_ids = 11;
 }
+
+message ChangeMembershipRequest { repeated uint64 voter_ids = 1; }
+message ChangeMembershipResponse { uint64 term = 1; uint64 log_index = 2; }
 
 // NotLeader is attached to FailedPrecondition gRPC statuses.
 message NotLeader {
@@ -108,6 +114,9 @@ message SnapshotChunk {
   uint64 total_size = 7;
   uint32 checksum = 8;
   bytes data = 9;
+  repeated uint64 voters = 10;
+  repeated uint64 joint_voters = 11;
+  uint64 membership_index = 12;
 }
 
 // Command is the deterministic payload stored in the Raft log.

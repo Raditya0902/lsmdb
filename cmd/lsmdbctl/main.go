@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,20 @@ func main() {
 	case "status":
 		response, err := client.Status(ctx)
 		printJSON(response, err)
+	case "members":
+		if flag.NArg() != 2 {
+			usage()
+		}
+		var voters []uint64
+		for _, raw := range splitNonEmpty(flag.Arg(1)) {
+			id, err := strconv.ParseUint(raw, 10, 64)
+			if err != nil || id == 0 {
+				log.Fatalf("invalid voter ID %q", raw)
+			}
+			voters = append(voters, id)
+		}
+		response, err := client.ChangeMembership(ctx, voters)
+		printJSON(response, err)
 	default:
 		usage()
 	}
@@ -77,6 +92,6 @@ func printJSON(value any, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: lsmdbctl [flags] put KEY VALUE | get KEY | delete KEY | status")
+	fmt.Fprintln(os.Stderr, "usage: lsmdbctl [flags] put KEY VALUE | get KEY | delete KEY | status | members ID,ID,...")
 	os.Exit(2)
 }

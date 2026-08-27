@@ -67,7 +67,7 @@ func (x Command_Operation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Command_Operation.Descriptor instead.
 func (Command_Operation) EnumDescriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{13, 0}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{15, 0}
 }
 
 type PutRequest struct {
@@ -453,6 +453,8 @@ type StatusResponse struct {
 	Peers              []*Peer                `protobuf:"bytes,7,rep,name=peers,proto3" json:"peers,omitempty"`
 	SnapshotIndex      uint64                 `protobuf:"varint,8,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
 	RetainedLogEntries uint64                 `protobuf:"varint,9,opt,name=retained_log_entries,json=retainedLogEntries,proto3" json:"retained_log_entries,omitempty"`
+	VoterIds           []uint64               `protobuf:"varint,10,rep,packed,name=voter_ids,json=voterIds,proto3" json:"voter_ids,omitempty"`
+	JointVoterIds      []uint64               `protobuf:"varint,11,rep,packed,name=joint_voter_ids,json=jointVoterIds,proto3" json:"joint_voter_ids,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -550,6 +552,116 @@ func (x *StatusResponse) GetRetainedLogEntries() uint64 {
 	return 0
 }
 
+func (x *StatusResponse) GetVoterIds() []uint64 {
+	if x != nil {
+		return x.VoterIds
+	}
+	return nil
+}
+
+func (x *StatusResponse) GetJointVoterIds() []uint64 {
+	if x != nil {
+		return x.JointVoterIds
+	}
+	return nil
+}
+
+type ChangeMembershipRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VoterIds      []uint64               `protobuf:"varint,1,rep,packed,name=voter_ids,json=voterIds,proto3" json:"voter_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeMembershipRequest) Reset() {
+	*x = ChangeMembershipRequest{}
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeMembershipRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeMembershipRequest) ProtoMessage() {}
+
+func (x *ChangeMembershipRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeMembershipRequest.ProtoReflect.Descriptor instead.
+func (*ChangeMembershipRequest) Descriptor() ([]byte, []int) {
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ChangeMembershipRequest) GetVoterIds() []uint64 {
+	if x != nil {
+		return x.VoterIds
+	}
+	return nil
+}
+
+type ChangeMembershipResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	LogIndex      uint64                 `protobuf:"varint,2,opt,name=log_index,json=logIndex,proto3" json:"log_index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeMembershipResponse) Reset() {
+	*x = ChangeMembershipResponse{}
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeMembershipResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeMembershipResponse) ProtoMessage() {}
+
+func (x *ChangeMembershipResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeMembershipResponse.ProtoReflect.Descriptor instead.
+func (*ChangeMembershipResponse) Descriptor() ([]byte, []int) {
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ChangeMembershipResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *ChangeMembershipResponse) GetLogIndex() uint64 {
+	if x != nil {
+		return x.LogIndex
+	}
+	return 0
+}
+
 // NotLeader is attached to FailedPrecondition gRPC statuses.
 type NotLeader struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -561,7 +673,7 @@ type NotLeader struct {
 
 func (x *NotLeader) Reset() {
 	*x = NotLeader{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[8]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -573,7 +685,7 @@ func (x *NotLeader) String() string {
 func (*NotLeader) ProtoMessage() {}
 
 func (x *NotLeader) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[8]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -586,7 +698,7 @@ func (x *NotLeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotLeader.ProtoReflect.Descriptor instead.
 func (*NotLeader) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{8}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *NotLeader) GetLeaderId() uint64 {
@@ -614,7 +726,7 @@ type LogEntry struct {
 
 func (x *LogEntry) Reset() {
 	*x = LogEntry{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[9]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -626,7 +738,7 @@ func (x *LogEntry) String() string {
 func (*LogEntry) ProtoMessage() {}
 
 func (x *LogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[9]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -639,7 +751,7 @@ func (x *LogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
 func (*LogEntry) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{9}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *LogEntry) GetIndex() uint64 {
@@ -682,7 +794,7 @@ type RaftMessage struct {
 
 func (x *RaftMessage) Reset() {
 	*x = RaftMessage{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[10]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -694,7 +806,7 @@ func (x *RaftMessage) String() string {
 func (*RaftMessage) ProtoMessage() {}
 
 func (x *RaftMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[10]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -707,7 +819,7 @@ func (x *RaftMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftMessage.ProtoReflect.Descriptor instead.
 func (*RaftMessage) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{10}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RaftMessage) GetType() uint32 {
@@ -795,7 +907,7 @@ type RaftAck struct {
 
 func (x *RaftAck) Reset() {
 	*x = RaftAck{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[11]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -807,7 +919,7 @@ func (x *RaftAck) String() string {
 func (*RaftAck) ProtoMessage() {}
 
 func (x *RaftAck) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[11]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -820,27 +932,30 @@ func (x *RaftAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftAck.ProtoReflect.Descriptor instead.
 func (*RaftAck) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{11}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{13}
 }
 
 type SnapshotChunk struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	From          uint64                 `protobuf:"varint,1,opt,name=from,proto3" json:"from,omitempty"`
-	To            uint64                 `protobuf:"varint,2,opt,name=to,proto3" json:"to,omitempty"`
-	RaftTerm      uint64                 `protobuf:"varint,3,opt,name=raft_term,json=raftTerm,proto3" json:"raft_term,omitempty"`
-	SnapshotIndex uint64                 `protobuf:"varint,4,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
-	SnapshotTerm  uint64                 `protobuf:"varint,5,opt,name=snapshot_term,json=snapshotTerm,proto3" json:"snapshot_term,omitempty"`
-	Offset        uint64                 `protobuf:"varint,6,opt,name=offset,proto3" json:"offset,omitempty"`
-	TotalSize     uint64                 `protobuf:"varint,7,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
-	Checksum      uint32                 `protobuf:"varint,8,opt,name=checksum,proto3" json:"checksum,omitempty"`
-	Data          []byte                 `protobuf:"bytes,9,opt,name=data,proto3" json:"data,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	From            uint64                 `protobuf:"varint,1,opt,name=from,proto3" json:"from,omitempty"`
+	To              uint64                 `protobuf:"varint,2,opt,name=to,proto3" json:"to,omitempty"`
+	RaftTerm        uint64                 `protobuf:"varint,3,opt,name=raft_term,json=raftTerm,proto3" json:"raft_term,omitempty"`
+	SnapshotIndex   uint64                 `protobuf:"varint,4,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	SnapshotTerm    uint64                 `protobuf:"varint,5,opt,name=snapshot_term,json=snapshotTerm,proto3" json:"snapshot_term,omitempty"`
+	Offset          uint64                 `protobuf:"varint,6,opt,name=offset,proto3" json:"offset,omitempty"`
+	TotalSize       uint64                 `protobuf:"varint,7,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
+	Checksum        uint32                 `protobuf:"varint,8,opt,name=checksum,proto3" json:"checksum,omitempty"`
+	Data            []byte                 `protobuf:"bytes,9,opt,name=data,proto3" json:"data,omitempty"`
+	Voters          []uint64               `protobuf:"varint,10,rep,packed,name=voters,proto3" json:"voters,omitempty"`
+	JointVoters     []uint64               `protobuf:"varint,11,rep,packed,name=joint_voters,json=jointVoters,proto3" json:"joint_voters,omitempty"`
+	MembershipIndex uint64                 `protobuf:"varint,12,opt,name=membership_index,json=membershipIndex,proto3" json:"membership_index,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SnapshotChunk) Reset() {
 	*x = SnapshotChunk{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -852,7 +967,7 @@ func (x *SnapshotChunk) String() string {
 func (*SnapshotChunk) ProtoMessage() {}
 
 func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[12]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -865,7 +980,7 @@ func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
 func (*SnapshotChunk) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{12}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SnapshotChunk) GetFrom() uint64 {
@@ -931,6 +1046,27 @@ func (x *SnapshotChunk) GetData() []byte {
 	return nil
 }
 
+func (x *SnapshotChunk) GetVoters() []uint64 {
+	if x != nil {
+		return x.Voters
+	}
+	return nil
+}
+
+func (x *SnapshotChunk) GetJointVoters() []uint64 {
+	if x != nil {
+		return x.JointVoters
+	}
+	return nil
+}
+
+func (x *SnapshotChunk) GetMembershipIndex() uint64 {
+	if x != nil {
+		return x.MembershipIndex
+	}
+	return 0
+}
+
 // Command is the deterministic payload stored in the Raft log.
 type Command struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -945,7 +1081,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[13]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -957,7 +1093,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[13]
+	mi := &file_api_lsmdb_v1_lsmdb_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -970,7 +1106,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{13}
+	return file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Command) GetOperation() Command_Operation {
@@ -1039,7 +1175,7 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\rStatusRequest\"0\n" +
 	"\x04Peer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xb5\x02\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xfa\x02\n" +
 	"\x0eStatusResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x12\n" +
@@ -1049,7 +1185,15 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\rapplied_index\x18\x06 \x01(\x04R\fappliedIndex\x12$\n" +
 	"\x05peers\x18\a \x03(\v2\x0e.lsmdb.v1.PeerR\x05peers\x12%\n" +
 	"\x0esnapshot_index\x18\b \x01(\x04R\rsnapshotIndex\x120\n" +
-	"\x14retained_log_entries\x18\t \x01(\x04R\x12retainedLogEntries\"O\n" +
+	"\x14retained_log_entries\x18\t \x01(\x04R\x12retainedLogEntries\x12\x1b\n" +
+	"\tvoter_ids\x18\n" +
+	" \x03(\x04R\bvoterIds\x12&\n" +
+	"\x0fjoint_voter_ids\x18\v \x03(\x04R\rjointVoterIds\"6\n" +
+	"\x17ChangeMembershipRequest\x12\x1b\n" +
+	"\tvoter_ids\x18\x01 \x03(\x04R\bvoterIds\"K\n" +
+	"\x18ChangeMembershipResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1b\n" +
+	"\tlog_index\x18\x02 \x01(\x04R\blogIndex\"O\n" +
 	"\tNotLeader\x12\x1b\n" +
 	"\tleader_id\x18\x01 \x01(\x04R\bleaderId\x12%\n" +
 	"\x0eleader_address\x18\x02 \x01(\tR\rleaderAddress\"H\n" +
@@ -1071,7 +1215,7 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	" \x01(\x04R\n" +
 	"rejectHint\x12\x18\n" +
 	"\acontext\x18\v \x01(\x04R\acontextJ\x04\b\f\x10\x0f\"\t\n" +
-	"\aRaftAck\"\x83\x02\n" +
+	"\aRaftAck\"\xe9\x02\n" +
 	"\rSnapshotChunk\x12\x12\n" +
 	"\x04from\x18\x01 \x01(\x04R\x04from\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\x04R\x02to\x12\x1b\n" +
@@ -1082,7 +1226,11 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\n" +
 	"total_size\x18\a \x01(\x04R\ttotalSize\x12\x1a\n" +
 	"\bchecksum\x18\b \x01(\rR\bchecksum\x12\x12\n" +
-	"\x04data\x18\t \x01(\fR\x04data\"\xf4\x01\n" +
+	"\x04data\x18\t \x01(\fR\x04data\x12\x16\n" +
+	"\x06voters\x18\n" +
+	" \x03(\x04R\x06voters\x12!\n" +
+	"\fjoint_voters\x18\v \x03(\x04R\vjointVoters\x12)\n" +
+	"\x10membership_index\x18\f \x01(\x04R\x0fmembershipIndex\"\xf4\x01\n" +
 	"\aCommand\x129\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x1b.lsmdb.v1.Command.OperationR\toperation\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12\x14\n" +
@@ -1093,12 +1241,13 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\tOperation\x12\x12\n" +
 	"\x0eOPERATION_NOOP\x10\x00\x12\x11\n" +
 	"\rOPERATION_PUT\x10\x01\x12\x14\n" +
-	"\x10OPERATION_DELETE\x10\x022\xe7\x01\n" +
+	"\x10OPERATION_DELETE\x10\x022\xc2\x02\n" +
 	"\x02KV\x124\n" +
 	"\x03Put\x12\x14.lsmdb.v1.PutRequest\x1a\x17.lsmdb.v1.WriteResponse\x12:\n" +
 	"\x06Delete\x12\x17.lsmdb.v1.DeleteRequest\x1a\x17.lsmdb.v1.WriteResponse\x122\n" +
 	"\x03Get\x12\x14.lsmdb.v1.GetRequest\x1a\x15.lsmdb.v1.GetResponse\x12;\n" +
-	"\x06Status\x12\x17.lsmdb.v1.StatusRequest\x1a\x18.lsmdb.v1.StatusResponse2y\n" +
+	"\x06Status\x12\x17.lsmdb.v1.StatusRequest\x1a\x18.lsmdb.v1.StatusResponse\x12Y\n" +
+	"\x10ChangeMembership\x12!.lsmdb.v1.ChangeMembershipRequest\x1a\".lsmdb.v1.ChangeMembershipResponse2y\n" +
 	"\x04Raft\x120\n" +
 	"\x04Send\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAck\x12?\n" +
 	"\x0fInstallSnapshot\x12\x17.lsmdb.v1.SnapshotChunk\x1a\x11.lsmdb.v1.RaftAck(\x01B\x1cZ\x1alsmdb/api/lsmdb/v1;lsmdbv1b\x06proto3"
@@ -1116,42 +1265,46 @@ func file_api_lsmdb_v1_lsmdb_proto_rawDescGZIP() []byte {
 }
 
 var file_api_lsmdb_v1_lsmdb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_api_lsmdb_v1_lsmdb_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_api_lsmdb_v1_lsmdb_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_api_lsmdb_v1_lsmdb_proto_goTypes = []any{
-	(Command_Operation)(0), // 0: lsmdb.v1.Command.Operation
-	(*PutRequest)(nil),     // 1: lsmdb.v1.PutRequest
-	(*DeleteRequest)(nil),  // 2: lsmdb.v1.DeleteRequest
-	(*WriteResponse)(nil),  // 3: lsmdb.v1.WriteResponse
-	(*GetRequest)(nil),     // 4: lsmdb.v1.GetRequest
-	(*GetResponse)(nil),    // 5: lsmdb.v1.GetResponse
-	(*StatusRequest)(nil),  // 6: lsmdb.v1.StatusRequest
-	(*Peer)(nil),           // 7: lsmdb.v1.Peer
-	(*StatusResponse)(nil), // 8: lsmdb.v1.StatusResponse
-	(*NotLeader)(nil),      // 9: lsmdb.v1.NotLeader
-	(*LogEntry)(nil),       // 10: lsmdb.v1.LogEntry
-	(*RaftMessage)(nil),    // 11: lsmdb.v1.RaftMessage
-	(*RaftAck)(nil),        // 12: lsmdb.v1.RaftAck
-	(*SnapshotChunk)(nil),  // 13: lsmdb.v1.SnapshotChunk
-	(*Command)(nil),        // 14: lsmdb.v1.Command
+	(Command_Operation)(0),           // 0: lsmdb.v1.Command.Operation
+	(*PutRequest)(nil),               // 1: lsmdb.v1.PutRequest
+	(*DeleteRequest)(nil),            // 2: lsmdb.v1.DeleteRequest
+	(*WriteResponse)(nil),            // 3: lsmdb.v1.WriteResponse
+	(*GetRequest)(nil),               // 4: lsmdb.v1.GetRequest
+	(*GetResponse)(nil),              // 5: lsmdb.v1.GetResponse
+	(*StatusRequest)(nil),            // 6: lsmdb.v1.StatusRequest
+	(*Peer)(nil),                     // 7: lsmdb.v1.Peer
+	(*StatusResponse)(nil),           // 8: lsmdb.v1.StatusResponse
+	(*ChangeMembershipRequest)(nil),  // 9: lsmdb.v1.ChangeMembershipRequest
+	(*ChangeMembershipResponse)(nil), // 10: lsmdb.v1.ChangeMembershipResponse
+	(*NotLeader)(nil),                // 11: lsmdb.v1.NotLeader
+	(*LogEntry)(nil),                 // 12: lsmdb.v1.LogEntry
+	(*RaftMessage)(nil),              // 13: lsmdb.v1.RaftMessage
+	(*RaftAck)(nil),                  // 14: lsmdb.v1.RaftAck
+	(*SnapshotChunk)(nil),            // 15: lsmdb.v1.SnapshotChunk
+	(*Command)(nil),                  // 16: lsmdb.v1.Command
 }
 var file_api_lsmdb_v1_lsmdb_proto_depIdxs = []int32{
 	7,  // 0: lsmdb.v1.StatusResponse.peers:type_name -> lsmdb.v1.Peer
-	10, // 1: lsmdb.v1.RaftMessage.entries:type_name -> lsmdb.v1.LogEntry
+	12, // 1: lsmdb.v1.RaftMessage.entries:type_name -> lsmdb.v1.LogEntry
 	0,  // 2: lsmdb.v1.Command.operation:type_name -> lsmdb.v1.Command.Operation
 	1,  // 3: lsmdb.v1.KV.Put:input_type -> lsmdb.v1.PutRequest
 	2,  // 4: lsmdb.v1.KV.Delete:input_type -> lsmdb.v1.DeleteRequest
 	4,  // 5: lsmdb.v1.KV.Get:input_type -> lsmdb.v1.GetRequest
 	6,  // 6: lsmdb.v1.KV.Status:input_type -> lsmdb.v1.StatusRequest
-	11, // 7: lsmdb.v1.Raft.Send:input_type -> lsmdb.v1.RaftMessage
-	13, // 8: lsmdb.v1.Raft.InstallSnapshot:input_type -> lsmdb.v1.SnapshotChunk
-	3,  // 9: lsmdb.v1.KV.Put:output_type -> lsmdb.v1.WriteResponse
-	3,  // 10: lsmdb.v1.KV.Delete:output_type -> lsmdb.v1.WriteResponse
-	5,  // 11: lsmdb.v1.KV.Get:output_type -> lsmdb.v1.GetResponse
-	8,  // 12: lsmdb.v1.KV.Status:output_type -> lsmdb.v1.StatusResponse
-	12, // 13: lsmdb.v1.Raft.Send:output_type -> lsmdb.v1.RaftAck
-	12, // 14: lsmdb.v1.Raft.InstallSnapshot:output_type -> lsmdb.v1.RaftAck
-	9,  // [9:15] is the sub-list for method output_type
-	3,  // [3:9] is the sub-list for method input_type
+	9,  // 7: lsmdb.v1.KV.ChangeMembership:input_type -> lsmdb.v1.ChangeMembershipRequest
+	13, // 8: lsmdb.v1.Raft.Send:input_type -> lsmdb.v1.RaftMessage
+	15, // 9: lsmdb.v1.Raft.InstallSnapshot:input_type -> lsmdb.v1.SnapshotChunk
+	3,  // 10: lsmdb.v1.KV.Put:output_type -> lsmdb.v1.WriteResponse
+	3,  // 11: lsmdb.v1.KV.Delete:output_type -> lsmdb.v1.WriteResponse
+	5,  // 12: lsmdb.v1.KV.Get:output_type -> lsmdb.v1.GetResponse
+	8,  // 13: lsmdb.v1.KV.Status:output_type -> lsmdb.v1.StatusResponse
+	10, // 14: lsmdb.v1.KV.ChangeMembership:output_type -> lsmdb.v1.ChangeMembershipResponse
+	14, // 15: lsmdb.v1.Raft.Send:output_type -> lsmdb.v1.RaftAck
+	14, // 16: lsmdb.v1.Raft.InstallSnapshot:output_type -> lsmdb.v1.RaftAck
+	10, // [10:17] is the sub-list for method output_type
+	3,  // [3:10] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name
@@ -1168,7 +1321,7 @@ func file_api_lsmdb_v1_lsmdb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_lsmdb_v1_lsmdb_proto_rawDesc), len(file_api_lsmdb_v1_lsmdb_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

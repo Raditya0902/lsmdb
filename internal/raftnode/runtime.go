@@ -50,6 +50,11 @@ type proposalEvent struct {
 	result chan proposalResult
 }
 
+type membershipEvent struct {
+	voters []uint64
+	result chan proposalResult
+}
+
 type messageEvent struct {
 	message raft.Message
 	result  chan error
@@ -110,6 +115,27 @@ func Start(cfg Config, node *raft.Node, store StableStore, transport Transport, 
 func (r *Runtime) Propose(ctx context.Context, command []byte) (uint64, error) {
 	result := make(chan proposalResult, 1)
 	event := proposalEvent{data: append([]byte(nil), command...), result: result}
+	select {
+	case r.events <- event:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-r.done:
+		return 0, raft.ErrStopped
+	}
+	select {
+	case response := <-result:
+		return response.index, response.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-r.done:
+		return 0, raft.ErrStopped
+	}
+}
+
+// ChangeMembership waits for the final configuration entry to commit locally.
+func (r *Runtime) ChangeMembership(ctx context.Context, voters []uint64) (uint64, error) {
+	result := make(chan proposalResult, 1)
+	event := membershipEvent{voters: append([]uint64(nil), voters...), result: result}
 	select {
 	case r.events <- event:
 	case <-ctx.Done():
@@ -229,6 +255,21 @@ func (r *Runtime) run(tickInterval time.Duration) {
 					r.fail(err, pending, pendingReads)
 					return
 				}
+			case membershipEvent:
+				index, update, err := r.node.ProposeMembership(event.voters)
+				if err != nil {
+					event.result <- proposalResult{err: err}
+					continue
+				}
+				if index <= r.node.Status().CommitIndex {
+					event.result <- proposalResult{index: index}
+					continue
+				}
+				pending[index] = pendingProposal{result: event.result}
+				if err := r.processUpdate(update, pending, pendingReads); err != nil {
+					r.fail(err, pending, pendingReads)
+					return
+				}
 			case messageEvent:
 				err := r.processUpdate(r.node.Step(event.message), pending, pendingReads)
 				if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
@@ -256,7 +297,7 @@ func (r *Runtime) run(tickInterval time.Duration) {
 					r.fail(err, pending, pendingReads)
 					return
 				}
-				if r.node.QuorumSize() == 1 {
+				if r.node.HasQuorum(map[uint64]struct{}{r.node.Status().ID: {}}) {
 					event.result <- readResult{index: r.node.Status().CommitIndex}
 					delete(pendingReads, contextID)
 				}
@@ -298,7 +339,15 @@ func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingPr
 		if entry.Index != r.machine.AppliedIndex()+1 {
 			return fmt.Errorf("commit apply gap: got %d, want %d", entry.Index, r.machine.AppliedIndex()+1)
 		}
-		if err := r.machine.Apply(entry.Index, entry.Data); err != nil {
+		command := entry.Data
+		membership, err := raft.IsMembershipEntry(entry.Data)
+		if err != nil {
+			return fmt.Errorf("decode committed entry %d: %w", entry.Index, err)
+		}
+		if membership {
+			command = nil
+		}
+		if err := r.machine.Apply(entry.Index, command); err != nil {
 			return fmt.Errorf("apply committed entry %d: %w", entry.Index, err)
 		}
 		if waiter, ok := pending[entry.Index]; ok {
@@ -342,7 +391,7 @@ func (r *Runtime) acknowledgeRead(message raft.Message, pendingReads map[uint64]
 	}
 	read.acks[message.From] = struct{}{}
 	pendingReads[message.Context] = read
-	if len(read.acks) < r.node.QuorumSize() {
+	if !r.node.HasQuorum(read.acks) {
 		return
 	}
 	index := r.node.Status().CommitIndex

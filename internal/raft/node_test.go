@@ -143,6 +143,37 @@ func TestFollowerTruncatesConflictingSuffix(t *testing.T) {
 	}
 }
 
+func TestFollowerNeverTruncatesCommittedEntry(t *testing.T) {
+	cfg := testConfig(2)
+	cfg.AppliedIndex = 1
+	node, err := New(cfg, HardState{Term: 2}, []Entry{{Index: 1, Term: 1, Data: []byte("committed")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 2, LogIndex: 0, Entries: []Entry{{Index: 1, Term: 2, Data: []byte("unsafe")}}})
+	if len(update.Messages) != 1 || !update.Messages[0].Reject {
+		t.Fatalf("response = %#v", update.Messages)
+	}
+	if string(node.Entries()[0].Data) != "committed" {
+		t.Fatal("committed entry was replaced")
+	}
+}
+
+func TestFollowerRejectsMalformedMembershipWithoutMutatingLog(t *testing.T) {
+	node, err := New(testConfig(2), HardState{Term: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append(append([]byte(nil), membershipPrefix...), []byte("not-json")...)
+	update := node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 2, Entries: []Entry{{Index: 1, Term: 2, Data: bad}}})
+	if len(update.Messages) != 1 || !update.Messages[0].Reject {
+		t.Fatalf("response = %#v", update.Messages)
+	}
+	if len(update.Entries) != 0 || len(node.Entries()) != 0 {
+		t.Fatal("malformed membership changed the log")
+	}
+}
+
 func TestLeaderStepsDownAfterLosingQuorum(t *testing.T) {
 	nodes := newTestCluster(t)
 	leader := electNodeOne(t, nodes)
@@ -218,5 +249,155 @@ func TestLeaderSendsSnapshotToFollowerBehindCompactedPrefix(t *testing.T) {
 	update = node.Step(Message{Type: MsgAppendResponse, From: 3, To: 1, Term: 2, Reject: true, RejectHint: 1})
 	if len(update.Messages) != 1 || update.Messages[0].Type != MsgSnapshot || update.Messages[0].Snapshot == nil {
 		t.Fatalf("catch-up message = %#v", update.Messages)
+	}
+}
+
+func newMembershipCluster(t *testing.T) map[uint64]*Node {
+	t.Helper()
+	nodes := make(map[uint64]*Node)
+	for id := uint64(1); id <= 4; id++ {
+		node, err := New(testConfig(id), HardState{}, nil)
+		if err != nil {
+			t.Fatalf("New(%d): %v", id, err)
+		}
+		nodes[id] = node
+	}
+	return nodes
+}
+
+func TestJointConsensusRequiresOldAndNewMajorities(t *testing.T) {
+	nodes := newMembershipCluster(t)
+	leader := electNodeOne(t, nodes)
+	finalIndex, update, err := leader.ProposeMembership([]uint64{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalIndex != 3 {
+		t.Fatalf("final index = %d, want 3", finalIndex)
+	}
+	if _, _, err := leader.ProposeMembership([]uint64{1, 2}); err != ErrMembershipChangeInProgress {
+		t.Fatalf("overlapping change error = %v", err)
+	}
+
+	// Node 2 plus the leader is an old majority, but only two of four new voters.
+	var toFour []Message
+	for _, message := range update.Messages {
+		switch message.To {
+		case 2:
+			response := nodes[2].Step(message)
+			for _, reply := range response.Messages {
+				leader.Step(reply)
+			}
+		case 4:
+			toFour = append(toFour, message)
+		}
+	}
+	if leader.Status().CommitIndex != 1 {
+		t.Fatalf("joint entry committed without new majority: %+v", leader.Status())
+	}
+
+	// Catching up node 4 creates both required majorities and commits C_old,new.
+	queue := toFour
+	var completion Update
+	for steps := 0; len(queue) > 0 && steps < 20; steps++ {
+		message := queue[0]
+		queue = queue[1:]
+		response := nodes[message.To].Step(message)
+		for _, reply := range response.Messages {
+			if reply.To == 1 {
+				completion = leader.Step(reply)
+				queue = append(queue, completion.Messages...)
+			} else {
+				queue = append(queue, reply)
+			}
+		}
+		if leader.Status().CommitIndex >= 2 {
+			break
+		}
+	}
+	if leader.Status().CommitIndex != 2 {
+		t.Fatalf("joint entry did not commit: %+v", leader.Status())
+	}
+	if leader.Status().Membership.Index != 3 || len(leader.Status().Membership.JointVoters) != 0 {
+		t.Fatalf("final configuration was not appended: %+v", leader.Status().Membership)
+	}
+	deliverAll(t, nodes, completion.Messages)
+	if leader.Status().CommitIndex != 3 {
+		t.Fatalf("final configuration did not commit: %+v", leader.Status())
+	}
+	for id, node := range nodes {
+		if !equalVoters(node.Status().Membership.Voters, []uint64{1, 2, 3, 4}) {
+			t.Fatalf("node %d membership = %+v", id, node.Status().Membership)
+		}
+	}
+}
+
+func TestRemovedLeaderStepsDownAfterFinalConfigurationCommits(t *testing.T) {
+	nodes := newMembershipCluster(t)
+	leader := electNodeOne(t, nodes)
+	_, update, err := leader.ProposeMembership([]uint64{2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverAll(t, nodes, update.Messages)
+	status := leader.Status()
+	if status.CommitIndex != 3 || status.Role != Follower {
+		t.Fatalf("removed leader status = %+v", status)
+	}
+	if _, _, err := leader.Propose([]byte("unsafe")); err != ErrNotLeader {
+		t.Fatalf("removed leader proposal error = %v", err)
+	}
+}
+
+func TestMembershipSurvivesSnapshotRestore(t *testing.T) {
+	nodes := newMembershipCluster(t)
+	leader := electNodeOne(t, nodes)
+	_, update, err := leader.ProposeMembership([]uint64{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverAll(t, nodes, update.Messages)
+	status := leader.Status()
+	snapshotUpdate, err := leader.CreateSnapshot(status.CommitIndex, []byte("state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := *snapshotUpdate.Snapshot
+	cfg := testConfig(1)
+	cfg.AppliedIndex = snapshot.Index
+	restored, err := New(cfg, HardState{Term: status.Term}, nil, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalVoters(restored.Status().Membership.Voters, []uint64{1, 2, 3, 4}) {
+		t.Fatalf("restored membership = %+v", restored.Status().Membership)
+	}
+}
+
+func TestJointConfigurationControlsElectionAndReadQuorums(t *testing.T) {
+	joint := Entry{Index: 1, Term: 1, Data: encodeMembership(membershipCommand{Phase: configJoint, Old: []uint64{1, 2, 3}, New: []uint64{1, 3, 4}})}
+	node, err := New(testConfig(1), HardState{Term: 1}, []Entry{joint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20 && node.Status().Role != PreCandidate; i++ {
+		node.Tick()
+	}
+	if node.Status().Role != PreCandidate {
+		t.Fatalf("role = %s", node.Status().Role)
+	}
+	node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: 2})
+	if node.Status().Role != PreCandidate {
+		t.Fatalf("old majority alone advanced election: %s", node.Status().Role)
+	}
+	node.Step(Message{Type: MsgPreVoteResponse, From: 4, To: 1, Term: 2})
+	if node.Status().Role != Candidate {
+		t.Fatalf("joint majorities did not advance election: %s", node.Status().Role)
+	}
+	if node.HasQuorum(map[uint64]struct{}{1: {}, 2: {}}) {
+		t.Fatal("old-only acknowledgements satisfied joint quorum")
+	}
+	if !node.HasQuorum(map[uint64]struct{}{1: {}, 2: {}, 4: {}}) {
+		t.Fatal("old and new majorities did not satisfy joint quorum")
 	}
 }

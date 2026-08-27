@@ -29,7 +29,7 @@ func snapshotChunks(data []byte) []*lsmdbv1.SnapshotChunk {
 	var chunks []*lsmdbv1.SnapshotChunk
 	for offset := 0; offset < len(data) || (len(data) == 0 && offset == 0); offset += SnapshotChunkBytes {
 		end := min(offset+SnapshotChunkBytes, len(data))
-		chunks = append(chunks, &lsmdbv1.SnapshotChunk{From: 1, To: 2, RaftTerm: 4, SnapshotIndex: 9, SnapshotTerm: 3, Offset: uint64(offset), TotalSize: uint64(len(data)), Checksum: checksum, Data: append([]byte(nil), data[offset:end]...)})
+		chunks = append(chunks, &lsmdbv1.SnapshotChunk{From: 1, To: 2, RaftTerm: 4, SnapshotIndex: 9, SnapshotTerm: 3, Offset: uint64(offset), TotalSize: uint64(len(data)), Checksum: checksum, Data: append([]byte(nil), data[offset:end]...), Voters: []uint64{1, 2, 3}, MembershipIndex: 7})
 		if len(data) == 0 {
 			break
 		}
@@ -45,6 +45,9 @@ func TestReceiveSnapshotReassemblesOrderedChunks(t *testing.T) {
 	}
 	if message.From != 1 || message.To != 2 || message.Term != 4 || message.Snapshot == nil || message.Snapshot.Index != 9 || message.Snapshot.Term != 3 || !bytes.Equal(message.Snapshot.Data, data) {
 		t.Fatalf("message = %#v", message)
+	}
+	if message.Snapshot.Membership.Index != 7 || len(message.Snapshot.Membership.Voters) != 3 {
+		t.Fatalf("membership = %+v", message.Snapshot.Membership)
 	}
 }
 
@@ -74,6 +77,11 @@ func TestReceiveSnapshotRejectsMetadataChangesAndOversize(t *testing.T) {
 	chunks[1].SnapshotTerm++
 	if _, err := ReceiveSnapshot(&chunkReceiver{chunks: chunks}); err == nil || !strings.Contains(err.Error(), "metadata changed") {
 		t.Fatalf("metadata error = %v", err)
+	}
+	chunks = snapshotChunks(bytes.Repeat([]byte("x"), SnapshotChunkBytes+10))
+	chunks[1].Voters[0] = 9
+	if _, err := ReceiveSnapshot(&chunkReceiver{chunks: chunks}); err == nil || !strings.Contains(err.Error(), "metadata changed") {
+		t.Fatalf("membership metadata error = %v", err)
 	}
 	chunks = snapshotChunks(nil)
 	chunks[0].TotalSize = MaxSnapshotBytes + 1

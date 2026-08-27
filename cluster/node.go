@@ -33,6 +33,7 @@ type NodeConfig struct {
 	MetricsAddress    string
 	DataDir           string
 	Peers             map[uint64]string
+	Voters            []uint64
 	TickInterval      time.Duration
 	ElectionTickMin   int
 	ElectionTickMax   int
@@ -61,6 +62,12 @@ func (c *NodeConfig) defaults() {
 	if c.SnapshotThreshold == 0 {
 		c.SnapshotThreshold = 1000
 	}
+	if len(c.Voters) == 0 {
+		for id := range c.Peers {
+			c.Voters = append(c.Voters, id)
+		}
+		sort.Slice(c.Voters, func(i, j int) bool { return c.Voters[i] < c.Voters[j] })
+	}
 }
 
 func (c NodeConfig) validate() error {
@@ -69,6 +76,19 @@ func (c NodeConfig) validate() error {
 	}
 	if len(c.Peers) == 0 || c.Peers[c.ID] == "" {
 		return errors.New("static peers must contain the local node")
+	}
+	seen := make(map[uint64]struct{}, len(c.Voters))
+	for _, id := range c.Voters {
+		if id == 0 || c.Peers[id] == "" {
+			return fmt.Errorf("initial voter %d is not in the peer map", id)
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("duplicate initial voter %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return errors.New("at least one initial voter is required")
 	}
 	return nil
 }
@@ -115,13 +135,8 @@ func StartNode(config NodeConfig) (*Node, error) {
 			return nil, fmt.Errorf("restore state snapshot: %w", err)
 		}
 	}
-	peerIDs := make([]uint64, 0, len(config.Peers))
-	for id := range config.Peers {
-		peerIDs = append(peerIDs, id)
-	}
-	sort.Slice(peerIDs, func(i, j int) bool { return peerIDs[i] < peerIDs[j] })
 	core, err := raft.New(raft.Config{
-		ID: config.ID, Peers: peerIDs, ElectionTickMin: config.ElectionTickMin,
+		ID: config.ID, Peers: config.Voters, ElectionTickMin: config.ElectionTickMin,
 		ElectionTickMax: config.ElectionTickMax, HeartbeatTicks: config.HeartbeatTicks,
 		CheckQuorumTicks: config.CheckQuorumTicks, RandomSeed: config.ID,
 		AppliedIndex: machine.AppliedIndex(),
@@ -302,7 +317,33 @@ func (h *handler) Status(ctx context.Context, _ *lsmdbv1.StatusRequest) (*lsmdbv
 		LeaderId: current.LeaderID, CommitIndex: current.CommitIndex,
 		AppliedIndex: h.node.machine.AppliedIndex(), Peers: peers,
 		SnapshotIndex: current.SnapshotIndex, RetainedLogEntries: current.RetainedLogEntries,
+		VoterIds: current.Membership.Voters, JointVoterIds: current.Membership.JointVoters,
 	}, nil
+}
+
+func (h *handler) ChangeMembership(ctx context.Context, request *lsmdbv1.ChangeMembershipRequest) (*lsmdbv1.ChangeMembershipResponse, error) {
+	if request == nil || len(request.VoterIds) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one voter ID is required")
+	}
+	seen := make(map[uint64]struct{}, len(request.VoterIds))
+	for _, id := range request.VoterIds {
+		if h.node.config.Peers[id] == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "voter %d is not in the configured peer map", id)
+		}
+		if _, ok := seen[id]; ok {
+			return nil, status.Errorf(codes.InvalidArgument, "duplicate voter %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+	index, err := h.node.runtime.ChangeMembership(ctx, request.VoterIds)
+	if err != nil {
+		return nil, h.node.rpcError(err)
+	}
+	current, err := h.node.runtime.Status(ctx)
+	if err != nil {
+		return nil, h.node.rpcError(err)
+	}
+	return &lsmdbv1.ChangeMembershipResponse{Term: current.Term, LogIndex: index}, nil
 }
 
 func (h *handler) Send(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmdbv1.RaftAck, error) {
@@ -350,6 +391,9 @@ func (n *Node) rpcError(err error) error {
 	}
 	if errors.Is(err, raft.ErrReadNotReady) {
 		return status.Error(codes.Unavailable, err.Error())
+	}
+	if errors.Is(err, raft.ErrMembershipChangeInProgress) || errors.Is(err, raft.ErrNoMembershipChange) {
+		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return status.FromContextError(err).Err()

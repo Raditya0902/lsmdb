@@ -113,7 +113,7 @@ func TestStorePersistsSnapshotAndCompactsPrefix(t *testing.T) {
 	if err := store.Persist(raft.Update{Entries: []raft.Entry{{Index: 1, Term: 1, Data: []byte("one")}, {Index: 2, Term: 1, Data: []byte("two")}, {Index: 3, Term: 2, Data: []byte("three")}}}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := raft.Snapshot{Index: 2, Term: 1, Data: []byte("state")}
+	snapshot := raft.Snapshot{Index: 2, Term: 1, Data: []byte("state"), Membership: raft.Membership{Voters: []uint64{1, 2, 3}, Index: 2}}
 	if err := store.Persist(raft.Update{Snapshot: &snapshot}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +129,9 @@ func TestStorePersistsSnapshotAndCompactsPrefix(t *testing.T) {
 	got := reopened.LoadSnapshot()
 	if got.Index != 2 || got.Term != 1 || string(got.Data) != "state" {
 		t.Fatalf("snapshot = %#v", got)
+	}
+	if len(got.Membership.Voters) != 3 || got.Membership.Index != 2 {
+		t.Fatalf("snapshot membership = %+v", got.Membership)
 	}
 	_, entries := reopened.Load()
 	if len(entries) != 1 || entries[0].Index != 3 {

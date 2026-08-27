@@ -320,21 +320,42 @@ func loadSnapshot(dir string) (raft.Snapshot, error) {
 	index := binary.BigEndian.Uint64(data[0:8])
 	term := binary.BigEndian.Uint64(data[8:16])
 	length := binary.BigEndian.Uint64(data[16:24])
-	if index == 0 || term == 0 || length > maxSnapshotData || uint64(len(data)) != uint64(snapshotHeader+4)+length {
+	baseEnd := uint64(snapshotHeader) + length
+	if index == 0 || term == 0 || length > maxSnapshotData || uint64(len(data)) < baseEnd+4 {
 		return raft.Snapshot{}, errors.New("raft snapshot header is invalid")
 	}
 	if crc32.ChecksumIEEE(data[:len(data)-4]) != binary.BigEndian.Uint32(data[len(data)-4:]) {
 		return raft.Snapshot{}, errors.New("raft snapshot checksum mismatch")
 	}
-	return raft.Snapshot{Index: index, Term: term, Data: append([]byte(nil), data[snapshotHeader:len(data)-4]...)}, nil
+	var membership raft.Membership
+	if uint64(len(data)) != baseEnd+4 {
+		if uint64(len(data)) < baseEnd+8 {
+			return raft.Snapshot{}, errors.New("raft snapshot membership is truncated")
+		}
+		membershipLen := uint64(binary.BigEndian.Uint32(data[baseEnd : baseEnd+4]))
+		if uint64(len(data)) != baseEnd+4+membershipLen+4 {
+			return raft.Snapshot{}, errors.New("raft snapshot membership length is invalid")
+		}
+		if err := json.Unmarshal(data[baseEnd+4:baseEnd+4+membershipLen], &membership); err != nil {
+			return raft.Snapshot{}, fmt.Errorf("decode snapshot membership: %w", err)
+		}
+	}
+	return raft.Snapshot{Index: index, Term: term, Data: append([]byte(nil), data[snapshotHeader:baseEnd]...), Membership: membership}, nil
 }
 
 func storeSnapshot(dir string, snapshot raft.Snapshot) error {
-	buf := make([]byte, snapshotHeader+len(snapshot.Data)+4)
+	membership, err := json.Marshal(snapshot.Membership)
+	if err != nil {
+		return fmt.Errorf("encode snapshot membership: %w", err)
+	}
+	buf := make([]byte, snapshotHeader+len(snapshot.Data)+4+len(membership)+4)
 	binary.BigEndian.PutUint64(buf[0:8], snapshot.Index)
 	binary.BigEndian.PutUint64(buf[8:16], snapshot.Term)
 	binary.BigEndian.PutUint64(buf[16:24], uint64(len(snapshot.Data)))
 	copy(buf[snapshotHeader:], snapshot.Data)
+	membershipOffset := snapshotHeader + len(snapshot.Data)
+	binary.BigEndian.PutUint32(buf[membershipOffset:membershipOffset+4], uint32(len(membership)))
+	copy(buf[membershipOffset+4:], membership)
 	binary.BigEndian.PutUint32(buf[len(buf)-4:], crc32.ChecksumIEEE(buf[:len(buf)-4]))
 	tmp := filepath.Join(dir, ".SNAPSHOT.tmp")
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)

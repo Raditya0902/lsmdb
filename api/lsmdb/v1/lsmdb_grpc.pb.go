@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	KV_Put_FullMethodName    = "/lsmdb.v1.KV/Put"
-	KV_Delete_FullMethodName = "/lsmdb.v1.KV/Delete"
-	KV_Get_FullMethodName    = "/lsmdb.v1.KV/Get"
-	KV_Status_FullMethodName = "/lsmdb.v1.KV/Status"
+	KV_Put_FullMethodName              = "/lsmdb.v1.KV/Put"
+	KV_Delete_FullMethodName           = "/lsmdb.v1.KV/Delete"
+	KV_Get_FullMethodName              = "/lsmdb.v1.KV/Get"
+	KV_Status_FullMethodName           = "/lsmdb.v1.KV/Status"
+	KV_ChangeMembership_FullMethodName = "/lsmdb.v1.KV/ChangeMembership"
 )
 
 // KVClient is the client API for KV service.
@@ -33,6 +34,7 @@ type KVClient interface {
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*WriteResponse, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
+	ChangeMembership(ctx context.Context, in *ChangeMembershipRequest, opts ...grpc.CallOption) (*ChangeMembershipResponse, error)
 }
 
 type kVClient struct {
@@ -83,6 +85,16 @@ func (c *kVClient) Status(ctx context.Context, in *StatusRequest, opts ...grpc.C
 	return out, nil
 }
 
+func (c *kVClient) ChangeMembership(ctx context.Context, in *ChangeMembershipRequest, opts ...grpc.CallOption) (*ChangeMembershipResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ChangeMembershipResponse)
+	err := c.cc.Invoke(ctx, KV_ChangeMembership_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // KVServer is the server API for KV service.
 // All implementations must embed UnimplementedKVServer
 // for forward compatibility.
@@ -91,6 +103,7 @@ type KVServer interface {
 	Delete(context.Context, *DeleteRequest) (*WriteResponse, error)
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
+	ChangeMembership(context.Context, *ChangeMembershipRequest) (*ChangeMembershipResponse, error)
 	mustEmbedUnimplementedKVServer()
 }
 
@@ -112,6 +125,9 @@ func (UnimplementedKVServer) Get(context.Context, *GetRequest) (*GetResponse, er
 }
 func (UnimplementedKVServer) Status(context.Context, *StatusRequest) (*StatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Status not implemented")
+}
+func (UnimplementedKVServer) ChangeMembership(context.Context, *ChangeMembershipRequest) (*ChangeMembershipResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ChangeMembership not implemented")
 }
 func (UnimplementedKVServer) mustEmbedUnimplementedKVServer() {}
 func (UnimplementedKVServer) testEmbeddedByValue()            {}
@@ -206,6 +222,24 @@ func _KV_Status_Handler(srv interface{}, ctx context.Context, dec func(interface
 	return interceptor(ctx, in, info, handler)
 }
 
+func _KV_ChangeMembership_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ChangeMembershipRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVServer).ChangeMembership(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KV_ChangeMembership_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVServer).ChangeMembership(ctx, req.(*ChangeMembershipRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // KV_ServiceDesc is the grpc.ServiceDesc for KV service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,6 +262,10 @@ var KV_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Status",
 			Handler:    _KV_Status_Handler,
+		},
+		{
+			MethodName: "ChangeMembership",
+			Handler:    _KV_ChangeMembership_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

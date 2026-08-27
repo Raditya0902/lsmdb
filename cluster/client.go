@@ -108,6 +108,18 @@ func (c *Client) Status(ctx context.Context) (*lsmdbv1.StatusResponse, error) {
 	return nil, last
 }
 
+// ChangeMembership replaces the voter set using Raft joint consensus.
+func (c *Client) ChangeMembership(ctx context.Context, voters []uint64) (*lsmdbv1.ChangeMembershipResponse, error) {
+	request := &lsmdbv1.ChangeMembershipRequest{VoterIds: append([]uint64(nil), voters...)}
+	var response *lsmdbv1.ChangeMembershipResponse
+	err := c.retry(ctx, func(client lsmdbv1.KVClient) error {
+		var err error
+		response, err = client.ChangeMembership(ctx, request)
+		return err
+	})
+	return response, err
+}
+
 // Close releases cached gRPC connections.
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -144,7 +156,11 @@ func (c *Client) retry(ctx context.Context, call func(lsmdbv1.KVClient) error) e
 			if status.Code(err) == codes.InvalidArgument {
 				return err
 			}
-			if hint := leaderHint(err); hint != "" {
+			hint, notLeader := leaderHint(err)
+			if status.Code(err) == codes.FailedPrecondition && !notLeader {
+				return err
+			}
+			if hint != "" {
 				c.setLeader(hint)
 				addresses = c.orderedAddresses()
 			}
@@ -207,15 +223,15 @@ func (c *Client) setLeader(address string) {
 	c.mu.Unlock()
 }
 
-func leaderHint(err error) string {
+func leaderHint(err error) (string, bool) {
 	grpcStatus, ok := status.FromError(err)
 	if !ok {
-		return ""
+		return "", false
 	}
 	for _, detail := range grpcStatus.Details() {
 		if notLeader, ok := detail.(*lsmdbv1.NotLeader); ok {
-			return notLeader.LeaderAddress
+			return notLeader.LeaderAddress, true
 		}
 	}
-	return ""
+	return "", false
 }

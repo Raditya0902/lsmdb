@@ -72,6 +72,15 @@ declared total length and whole-image CRC. The receiver validates and reassemble
 the complete bounded image before calling the runtime, so network framing does
 not enlarge the consensus interface or affect in-memory fault tests.
 
+### D013 — Membership changes use two replicated configurations
+
+The leader appends `C_old,new`; elections, replication commit, ReadIndex, and
+quorum-loss checks require majorities of both voter sets. Only after that entry
+commits may it append `C_new`, which commits under the new voter set. One change
+may be active at a time. Candidate node addresses must already exist in every
+node's transport peer map; address discovery and peer-map mutation remain a
+separate operational concern. A removed leader steps down after `C_new` commits.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

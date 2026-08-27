@@ -1,10 +1,10 @@
 # Distributed KV Cluster: Task Tracker
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 ## Current Phase
 
-Streamed `InstallSnapshot` transfer is complete and verified.
+The five-node Compose profile and membership workflow are complete and verified.
 
 ## Completed
 
@@ -41,6 +41,15 @@ Streamed `InstallSnapshot` transfer is complete and verified.
 - [x] Preserve the transport seam and deterministic Raft message interface.
 - [x] Prevent overlapping outbound snapshot streams to the same peer.
 - [x] Exercise multi-chunk installation in the three-node offline-follower test.
+- [x] Encode replicated joint and final voter configurations.
+- [x] Require both old and new majorities for elections, commit, reads, and quorum checks.
+- [x] Persist membership through retained logs and Raft snapshot metadata.
+- [x] Add leader-only `ChangeMembership` gRPC and Go client operations.
+- [x] Support preconfigured non-voters through the `-voters` bootstrap option.
+- [x] Reject overlapping changes and make completed identical requests idempotent.
+- [x] Test add, restart, leader removal, continued writes, joint partitions, and snapshot restore.
+- [x] Add an optional five-node Compose profile with a three-voter bootstrap configuration.
+- [x] Document membership expansion, verification, removal, and restart behavior.
 
 ## In Progress
 
@@ -128,12 +137,25 @@ Streamed `InstallSnapshot` transfer is complete and verified.
 - 2026-08-26 — post-streaming `go vet ./...` — PASS.
 - 2026-08-26 — post-streaming `docker compose config` — PASS.
 - 2026-08-26 — post-streaming `./scripts/docker-smoke.sh` — PASS.
+- 2026-08-27 — deterministic joint-majority, election, read-quorum, removal, and snapshot tests — PASS.
+- 2026-08-27 — four-node add/restart/remove-leader integration, five consecutive runs — PASS.
+- 2026-08-27 — post-membership `go test ./...` — PASS.
+- 2026-08-27 — post-membership `go test -race ./...` — PASS.
+- 2026-08-27 — post-membership `go vet ./...` — PASS.
+- 2026-08-27 — post-membership `docker compose config` — PASS.
+- 2026-08-27 — post-membership `./scripts/docker-smoke.sh` — PASS.
+- 2026-08-27 — default and `five-node` profile `docker compose config` — PASS.
+- 2026-08-27 — isolated five-node Compose expansion from voters 1–3 to 1–5; all nodes converged — PASS.
+- 2026-08-27 — post-profile `go test ./...` — PASS.
+- 2026-08-27 — post-profile `go test -race ./...` — PASS.
+- 2026-08-27 — post-profile `go vet ./...` — PASS.
+- 2026-08-27 — post-profile `./scripts/docker-smoke.sh` three-node failover/restart — PASS.
 
 ## Blockers
 
-None. Snapshot creation and receive-side reassembly remain bounded to a 256 MiB
-in-memory image; transport itself is chunked.
+None. Candidate addresses must be preconfigured in every peer map; membership
+changes replicate voter IDs but do not distribute addresses.
 
 ## Next Task
 
-Design and implement joint-consensus membership changes.
+Select the next deferred evolution item; no implementation task is currently scheduled.

@@ -360,6 +360,21 @@ state. Only one snapshot stream per peer may be in flight.
 - Successful append responses track recent quorum activity. A leader that cannot
   confirm a majority within the configured interval steps down.
 
+### Joint-consensus membership
+
+Membership commands are internal Raft log entries and never reach the KV state
+machine. A leader first appends `C_old,new`. While that entry is active, election,
+commit, ReadIndex, and quorum-loss decisions independently require majorities of
+both voter sets. After it commits, the core appends `C_new`; that entry commits
+under the new voter set. A leader removed by `C_new` continues replicating the
+final entry but steps down as soon as it commits.
+
+The active configuration is reconstructed from the immutable bootstrap voters,
+the latest snapshot membership metadata, and the retained log suffix. This makes
+uncommitted configuration entries survive restart and ensures conflict truncation
+also rolls membership back. Candidate addresses are preconfigured in the
+transport adapter; consensus replicates IDs only.
+
 ### Write and read guarantees
 
 A write response is sent only after its entry is persisted by a majority,
@@ -389,5 +404,6 @@ linearizable read.
 - **In-memory snapshot images.** Transfer is chunked, but snapshot creation and
   receive-side reassembly are capped at 256 MiB rather than streamed through a
   temporary file.
-- **Static membership and plaintext transport.** Dynamic membership, TLS, authentication,
-  and rolling upgrades are deferred.
+- **Preconfigured peer addresses and plaintext transport.** Membership can
+  change, but runtime address discovery, TLS, authentication, and rolling upgrades
+  are deferred.

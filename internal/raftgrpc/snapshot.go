@@ -45,7 +45,7 @@ func ReceiveSnapshot(stream SnapshotReceiver) (raft.Message, error) {
 			}
 			first = chunk
 			data = make([]byte, 0, int(chunk.TotalSize))
-		} else if chunk.From != first.From || chunk.To != first.To || chunk.RaftTerm != first.RaftTerm || chunk.SnapshotIndex != first.SnapshotIndex || chunk.SnapshotTerm != first.SnapshotTerm || chunk.TotalSize != first.TotalSize || chunk.Checksum != first.Checksum {
+		} else if chunk.From != first.From || chunk.To != first.To || chunk.RaftTerm != first.RaftTerm || chunk.SnapshotIndex != first.SnapshotIndex || chunk.SnapshotTerm != first.SnapshotTerm || chunk.TotalSize != first.TotalSize || chunk.Checksum != first.Checksum || chunk.MembershipIndex != first.MembershipIndex || !equalIDs(chunk.Voters, first.Voters) || !equalIDs(chunk.JointVoters, first.JointVoters) {
 			return raft.Message{}, errors.New("snapshot stream metadata changed between chunks")
 		}
 		if chunk.Offset != received {
@@ -69,5 +69,20 @@ func ReceiveSnapshot(stream SnapshotReceiver) (raft.Message, error) {
 	if crc32.ChecksumIEEE(data) != first.Checksum {
 		return raft.Message{}, errors.New("snapshot stream checksum mismatch")
 	}
-	return raft.Message{Type: raft.MsgSnapshot, From: first.From, To: first.To, Term: first.RaftTerm, Snapshot: &raft.Snapshot{Index: first.SnapshotIndex, Term: first.SnapshotTerm, Data: data}}, nil
+	return raft.Message{Type: raft.MsgSnapshot, From: first.From, To: first.To, Term: first.RaftTerm, Snapshot: &raft.Snapshot{
+		Index: first.SnapshotIndex, Term: first.SnapshotTerm, Data: data,
+		Membership: raft.Membership{Voters: append([]uint64(nil), first.Voters...), JointVoters: append([]uint64(nil), first.JointVoters...), Index: first.MembershipIndex},
+	}}, nil
+}
+
+func equalIDs(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

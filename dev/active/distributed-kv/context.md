@@ -21,7 +21,8 @@ git status --short: clean before Phase 0 files
 
 ## Target System
 
-The first distributed release is a statically configured three-node cluster.
+The first distributed release defaults to three voters with statically
+preconfigured peer addresses; voter IDs can change through joint consensus.
 Clients send `Put`, `Delete`, and linearizable `Get` requests over gRPC. One Raft
 leader orders mutations; a write succeeds only after majority persistence,
 commit, and local application. Followers return a typed leader hint and the Go
@@ -66,14 +67,17 @@ sequence as one externally indexed batch, making retries deterministic.
 
 ## First-Release Limits
 
-The MVP uses fixed three-node membership, plaintext local networking, single-key
-operations, and leader-served point reads. It does not include transactions,
-distributed scans, authentication, rolling upgrades, or dynamic membership.
+The MVP uses preconfigured peer addresses, plaintext local networking, single-key
+operations, and leader-served point reads. Voters can change through joint
+consensus, but runtime address discovery is not included. It does not include
+transactions, distributed scans, authentication, or rolling upgrades.
 Snapshot transfer uses ordered 1 MiB gRPC chunks, while creation and receive-side
 reassembly remain bounded to a 256 MiB in-memory image.
 
 ## Deferred Evolution
 
-Next: disk-streamed snapshot images beyond 256 MiB, a five-node profile, joint-consensus
-membership, optional stale follower reads, sharding/multi-Raft, TLS, and
-production operations.
+Next: disk-streamed snapshot images beyond 256 MiB, runtime peer-address
+discovery, optional stale follower reads, sharding/multi-Raft, TLS, and
+production operations. The local Compose environment has an optional five-node
+profile for exercising membership changes; five-node production operations are
+still deferred.

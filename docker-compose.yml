@@ -1,7 +1,7 @@
 services:
   node1:
     build: .
-    command: ["-id=1", "-listen=:7001", "-metrics=:9001", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003"]
+    command: ["-id=1", "-listen=:7001", "-metrics=:9001", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003,4=node4:7004,5=node5:7005", "-voters=1,2,3"]
     ports: ["7001:7001", "9001:9001"]
     volumes: ["node1-data:/data"]
     healthcheck:
@@ -12,7 +12,7 @@ services:
 
   node2:
     build: .
-    command: ["-id=2", "-listen=:7002", "-metrics=:9002", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003"]
+    command: ["-id=2", "-listen=:7002", "-metrics=:9002", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003,4=node4:7004,5=node5:7005", "-voters=1,2,3"]
     ports: ["7002:7002", "9002:9002"]
     volumes: ["node2-data:/data"]
     healthcheck:
@@ -23,11 +23,35 @@ services:
 
   node3:
     build: .
-    command: ["-id=3", "-listen=:7003", "-metrics=:9003", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003"]
+    command: ["-id=3", "-listen=:7003", "-metrics=:9003", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003,4=node4:7004,5=node5:7005", "-voters=1,2,3"]
     ports: ["7003:7003", "9003:9003"]
     volumes: ["node3-data:/data"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9003/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+  node4:
+    profiles: ["five-node"]
+    build: .
+    command: ["-id=4", "-listen=:7004", "-metrics=:9004", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003,4=node4:7004,5=node5:7005", "-voters=1,2,3"]
+    ports: ["7004:7004", "9004:9004"]
+    volumes: ["node4-data:/data"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9004/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+  node5:
+    profiles: ["five-node"]
+    build: .
+    command: ["-id=5", "-listen=:7005", "-metrics=:9005", "-data-dir=/data", "-peers=1=node1:7001,2=node2:7002,3=node3:7003,4=node4:7004,5=node5:7005", "-voters=1,2,3"]
+    ports: ["7005:7005", "9005:9005"]
+    volumes: ["node5-data:/data"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9005/healthz"]
       interval: 2s
       timeout: 1s
       retries: 10
@@ -59,3 +83,5 @@ volumes:
   node1-data:
   node2-data:
   node3-data:
+  node4-data:
+  node5-data:

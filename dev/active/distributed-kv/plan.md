@@ -33,6 +33,10 @@ buildable and tested.
 9. **Streamed snapshot transport** — keep snapshot semantics inside Raft while
    adapting each snapshot message to ordered, checksummed gRPC chunks. Reject
    partial, inconsistent, and oversized streams before they reach consensus.
+10. **Joint-consensus membership** — replicate `C_old,new` and `C_new`
+    configurations, require both majorities while joint, permit one change at a
+    time, persist membership through snapshots/restart, and expose a leader-only
+    change operation for peer IDs already present in the transport map.
 
 ## Network Interface
 
@@ -40,6 +44,7 @@ buildable and tested.
 - `Delete(key, client_id, request_seq) -> term, log_index`
 - `Get(key) -> found, value, read_index`
 - `Status() -> node_id, role, term, leader_id, commit_index, applied_index, peers`
+- `ChangeMembership(voter_ids) -> term, final_config_log_index`
 
 Followers return a typed leader hint. Keys are at most 16 KiB and values at most
 4 MiB. The demo transport is plaintext.
@@ -63,6 +68,7 @@ Followers return a typed leader hint. Keys are at most 16 KiB and values at most
 
 ## Deferred
 
-Five-node deployment, dynamic membership, distributed scans, stale follower
-reads, sharding/multi-Raft, disk-streamed snapshots larger than 256 MiB, TLS,
-authentication, and rolling upgrades follow the MVP.
+Five-node production deployment, runtime peer-address discovery, distributed
+scans, stale follower reads, sharding/multi-Raft, disk-streamed snapshots larger
+than 256 MiB, TLS, authentication, and rolling upgrades follow the MVP. A local
+five-node Compose profile is included for membership-operation exercises.

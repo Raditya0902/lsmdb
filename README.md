@@ -46,7 +46,7 @@ opts := &db.Options{
 
 ## Distributed Raft cluster
 
-The repository also includes a statically configured three-node database that
+The repository also includes a statically addressed three-node database that
 uses the LSM engine as a replicated state machine. It implements Raft pre-vote,
 leader election, heartbeats, quorum replication, conflict repair, quorum-loss
 stepdown, persistent hard state/log recovery, retry deduplication, and
@@ -71,8 +71,8 @@ docker compose exec node1 lsmdbctl \
   -addresses=node1:7001,node2:7002,node3:7003 get hello
 ```
 
-- Node gRPC ports: `7001`, `7002`, `7003`
-- Node metrics/health ports: `9001`, `9002`, `9003`
+- Node gRPC ports: `7001`–`7003` by default; `7004`–`7005` with the `five-node` profile
+- Node metrics/health ports: `9001`–`9003` by default; `9004`–`9005` with the `five-node` profile
 - Prometheus: <http://localhost:9090>
 - Grafana: <http://localhost:3000> (anonymous viewer enabled)
 
@@ -86,6 +86,41 @@ The network interface supports `Put`, `Delete`, linearizable `Get`, and
 `Status`. Followers return a typed leader hint; the Go client automatically
 retries with the same client ID/request sequence, preventing a delayed retry
 from reapplying an older write after failover.
+
+Membership changes use Raft joint consensus. Every candidate node address must
+already be present in each node's `-peers` map; use `-voters=1,2,3` to distinguish
+the bootstrap voter set from preconfigured non-voters.
+
+The optional Compose profile starts nodes 4 and 5 with all five addresses
+preconfigured, but leaves the replicated voter set at nodes 1–3:
+
+```bash
+docker compose --profile five-node up -d --build
+
+# Ask any reachable node; the client follows leader hints.
+docker compose exec node1 lsmdbctl \
+  -addresses=node1:7001,node2:7002,node3:7003,node4:7004,node5:7005 \
+  members 1,2,3,4,5
+
+# Verify every node reports voter_ids 1–5 and no joint_voter_ids.
+for node in 1 2 3 4 5; do
+  docker compose exec -T "node$node" lsmdbctl \
+    -addresses="node$node:700$node" status
+done
+```
+
+Only the leader accepts a change. `C_old,new` must commit under both majorities
+before `C_new` is appended, and only one transition may run at a time. The
+command returns only after the final configuration commits locally. To remove a
+voter, submit the complete desired set, for example `members 1,2,3,4`; after all
+remaining nodes report that final set, stop node 5 with
+`docker compose stop node5`. Never stop a voter before removing it when doing so
+would eliminate the quorum required by either side of the joint configuration.
+
+Membership is durable in the Raft log and snapshots. Restarting containers does
+not reapply `-voters`; that flag is only the bootstrap configuration for fresh
+data directories. Use `docker compose down -v` only when intentionally deleting
+the cluster and starting again from voters 1–3.
 
 Nodes snapshot every 1,000 applied entries by default. Override this for local
 testing with `lsmdb-node -snapshot-threshold=N`. `Status` and Prometheus expose
@@ -225,7 +260,9 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
 - **No fsync per WAL append.** Only `Close()` fsyncs the WAL. Writes between the last flush and a power failure can be lost.
-- **Static cluster membership.** The distributed MVP requires the same fixed peer map on every node; joint-consensus membership changes are deferred.
+- **Preconfigured peer addresses.** Voter membership is dynamic, but node
+  addresses must already exist in every process's peer map; runtime address
+  discovery is not implemented.
 - **In-memory snapshot images.** Snapshot installation streams ordered 1 MiB
   chunks with a whole-image checksum, but creation and reassembly remain bounded
   to a 256 MiB in-memory image.

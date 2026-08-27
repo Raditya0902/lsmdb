@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 2s
+
+scrape_configs:
+  - job_name: lsmdb
+    static_configs:
+      - targets: ["node1:9001", "node2:9002", "node3:9003"]

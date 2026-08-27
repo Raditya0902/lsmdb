@@ -13,3 +13,12 @@ jobs:
         with:
           go-version-file: 'go.mod'
       - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/docker-smoke.sh

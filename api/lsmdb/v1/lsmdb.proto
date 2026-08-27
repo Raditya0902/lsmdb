@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package lsmdb.v1;
+
+option go_package = "lsmdb/api/lsmdb/v1;lsmdbv1";
+
+// Regenerate from the repository root:
+// PATH="$(go env GOPATH)/bin:$PATH" protoc \
+//   --go_out=. --go_opt=module=lsmdb \
+//   --go-grpc_out=. --go-grpc_opt=module=lsmdb \
+//   api/lsmdb/v1/lsmdb.proto
+
+service KV {
+  rpc Put(PutRequest) returns (WriteResponse);
+  rpc Delete(DeleteRequest) returns (WriteResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+service Raft {
+  rpc Send(RaftMessage) returns (RaftAck);
+}
+
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+  string client_id = 3;
+  uint64 request_seq = 4;
+}
+
+message DeleteRequest {
+  bytes key = 1;
+  string client_id = 2;
+  uint64 request_seq = 3;
+}
+
+message WriteResponse {
+  uint64 term = 1;
+  uint64 log_index = 2;
+}
+
+message GetRequest {
+  bytes key = 1;
+}
+
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+  uint64 read_index = 3;
+}
+
+message StatusRequest {}
+
+message Peer {
+  uint64 id = 1;
+  string address = 2;
+}
+
+message StatusResponse {
+  uint64 node_id = 1;
+  string role = 2;
+  uint64 term = 3;
+  uint64 leader_id = 4;
+  uint64 commit_index = 5;
+  uint64 applied_index = 6;
+  repeated Peer peers = 7;
+}
+
+// NotLeader is attached to FailedPrecondition gRPC statuses.
+message NotLeader {
+  uint64 leader_id = 1;
+  string leader_address = 2;
+}
+
+message LogEntry {
+  uint64 index = 1;
+  uint64 term = 2;
+  bytes data = 3;
+}
+
+message RaftMessage {
+  uint32 type = 1;
+  uint64 from = 2;
+  uint64 to = 3;
+  uint64 term = 4;
+  uint64 log_index = 5;
+  uint64 log_term = 6;
+  repeated LogEntry entries = 7;
+  uint64 leader_commit = 8;
+  bool reject = 9;
+  uint64 reject_hint = 10;
+  uint64 context = 11;
+}
+
+message RaftAck {}
+
+// Command is the deterministic payload stored in the Raft log.
+message Command {
+  enum Operation {
+    OPERATION_NOOP = 0;
+    OPERATION_PUT = 1;
+    OPERATION_DELETE = 2;
+  }
+
+  Operation operation = 1;
+  bytes key = 2;
+  bytes value = 3;
+  string client_id = 4;
+  uint64 request_seq = 5;
+}

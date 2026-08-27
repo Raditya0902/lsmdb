@@ -1,0 +1,5 @@
+.git
+results.json
+*.db
+*.test
+dev/active/phase-*

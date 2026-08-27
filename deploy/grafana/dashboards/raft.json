@@ -1,0 +1,44 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Known Leader",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "lsmdb_raft_leader_id", "legendFormat": "node {{node_id}}"}],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Commit and Applied Index",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "lsmdb_raft_commit_index", "legendFormat": "commit node {{node_id}}"},
+        {"expr": "lsmdb_raft_applied_index", "legendFormat": "applied node {{node_id}}"}
+      ],
+      "gridPos": {"h": 8, "w": 16, "x": 8, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC P95 Latency",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(lsmdb_grpc_request_duration_seconds_bucket[1m])) by (le, method))", "legendFormat": "{{method}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Replication Lag",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "lsmdb_raft_replication_lag", "legendFormat": "node {{node_id}} to {{peer_id}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["lsmdb", "raft"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "title": "LSMDB Raft Cluster",
+  "uid": "lsmdb-raft",
+  "version": 1
+}

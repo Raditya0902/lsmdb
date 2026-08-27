@@ -1,5 +1,15 @@
 package db
 
+// DurabilityMode selects the authority responsible for recovering writes.
+type DurabilityMode uint8
+
+const (
+	// DurabilityEmbedded uses the DB's own WAL and locally allocated sequence numbers.
+	DurabilityEmbedded DurabilityMode = iota
+	// DurabilityReplica uses an external replicated log and externally supplied indexes.
+	DurabilityReplica
+)
+
 // Options controls DB behaviour.
 type Options struct {
 	// FlushThreshold is the number of memtable entries that triggers a flush to an SSTable.
@@ -9,6 +19,10 @@ type Options struct {
 	// CompactionThreshold is the number of SSTables that triggers a compaction.
 	// A value ≤ 0 uses the default of 4.
 	CompactionThreshold int
+
+	// DurabilityMode defaults to DurabilityEmbedded. Replica mode is intended for
+	// the Raft state-machine adapter and accepts writes through ApplyBatch only.
+	DurabilityMode DurabilityMode
 }
 
 // DefaultOptions returns Options suitable for most uses.

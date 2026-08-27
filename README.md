@@ -44,6 +44,65 @@ opts := &db.Options{
 }
 ```
 
+## Distributed Raft cluster
+
+The repository also includes a statically configured three-node database that
+uses the LSM engine as a replicated state machine. It implements Raft pre-vote,
+leader election, heartbeats, quorum replication, conflict repair, quorum-loss
+stepdown, persistent hard state/log recovery, retry deduplication, and
+ReadIndex-style linearizable point reads.
+
+```text
+Client → gRPC leader → durable Raft majority → committed log index
+                                               ↓
+                         node 1 LSM   node 2 LSM   node 3 LSM
+```
+
+Start the complete cluster, Prometheus, and Grafana:
+
+```bash
+docker compose up -d --build
+
+# Run the client inside the Compose network so leader hints resolve.
+docker compose exec node1 lsmdbctl \
+  -addresses=node1:7001,node2:7002,node3:7003 put hello world
+docker compose exec node1 lsmdbctl \
+  -addresses=node1:7001,node2:7002,node3:7003 get hello
+```
+
+- Node gRPC ports: `7001`, `7002`, `7003`
+- Node metrics/health ports: `9001`, `9002`, `9003`
+- Prometheus: <http://localhost:9090>
+- Grafana: <http://localhost:3000> (anonymous viewer enabled)
+
+Run the automated leader-failure exercise with:
+
+```bash
+./scripts/docker-smoke.sh
+```
+
+The network interface supports `Put`, `Delete`, linearizable `Get`, and
+`Status`. Followers return a typed leader hint; the Go client automatically
+retries with the same client ID/request sequence, preventing a delayed retry
+from reapplying an older write after failover.
+
+### Cluster benchmark
+
+`go run ./cmd/clusterbench` starts a fresh local three-node cluster, measures
+replicated writes, stops the leader, and records time until a write succeeds
+through the new majority leader.
+
+```text
+Environment: Apple arm64, macOS, Go 1.26.1, loopback gRPC, 1,000 × 128-byte writes
+Throughput:  98.0 committed writes/sec
+Latency:     P50 10.79 ms, P95 13.35 ms, P99 16.23 ms
+Failover:    113.77 ms
+Failures:    0
+```
+
+These are local development results from 2026-08-26, not production capacity.
+Run the command on the target machine before using the numbers in a resume.
+
 ---
 
 ## Architecture
@@ -98,6 +157,9 @@ Get(key)
 | `BloomFilter` | Probabilistic per-SSTable skip filter; eliminates disk reads for absent keys          | `internal/bloom/bloom.go`       |
 | `Compactor`   | K-way heap merge across all SSTables; drops tombstones at the bottom level            | `internal/compact/compactor.go` |
 | `DB`          | Public API (`Open`, `Get`, `Set`, `Delete`, `Scan`, `Close`); orchestrates all components | `db/db.go`                      |
+| `Raft`        | Deterministic elections, replication, commit, pre-vote, and quorum checking             | `internal/raft/`               |
+| `Raft store`  | Durable term/vote and CRC-protected replicated log                                      | `internal/raftstore/`          |
+| `Cluster`     | gRPC node, linearizable KV handlers, leader hints, and retrying Go client                | `cluster/`                     |
 
 ---
 
@@ -156,8 +218,12 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - **Single writer.** `db.mu` serialises all writes. There is no concurrent write path.
 - **No compression.** Keys and values are written verbatim. There is no snappy/zstd layer.
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
-- **No atomic SSTable replacement.** A crash between writing the new SSTable and deleting the old ones leaves both on disk. On reopen, sequence number ordering produces correct results but the old files are not cleaned up.
+- **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
 - **No fsync per WAL append.** Only `Close()` fsyncs the WAL. Writes between the last flush and a power failure can be lost.
+- **Static cluster membership.** The distributed MVP requires the same fixed peer map on every node; joint-consensus membership changes are deferred.
+- **No Raft snapshots/log compaction.** Replica logs currently grow without bound. LSM applied watermarks make restart replay incremental, but do not replace snapshot installation.
+- **Point operations only over gRPC.** Distributed scans, transactions, and follower-stale reads are not exposed.
+- **Development security model.** The demo cluster uses plaintext gRPC with no authentication or rolling-upgrade protocol.
 
 ---
 

@@ -2,6 +2,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync"
 
 	"lsmdb/internal/compact"
+	"lsmdb/internal/manifest"
 	"lsmdb/internal/memtable"
 	"lsmdb/internal/sstable"
 	"lsmdb/internal/wal"
@@ -22,15 +24,34 @@ type KVPair struct {
 	Value []byte
 }
 
+// MutationType identifies an operation in an externally ordered batch.
+type MutationType uint8
+
+const (
+	MutationPut MutationType = iota
+	MutationDelete
+)
+
+// Mutation is one key change applied at an externally supplied sequence index.
+type Mutation struct {
+	Type  MutationType
+	Key   string
+	Value []byte
+}
+
 // DB is the handle to an open database instance.
 type DB struct {
-	mu      sync.RWMutex
-	mem     *memtable.MemTable
-	log     *wal.WAL          // nil when running in-memory (path == "")
-	path    string            // empty for in-memory DB
-	readers []*sstable.Reader // SSTable readers, newest first
-	nextSST uint64            // sequence number for the next SSTable file
-	opts    *Options
+	mu           sync.RWMutex
+	mem          *memtable.MemTable
+	log          *wal.WAL          // nil for in-memory and replica modes
+	path         string            // empty for in-memory DB
+	readers      []*sstable.Reader // SSTable readers, newest first
+	nextSST      uint64            // sequence number for the next SSTable file
+	opts         *Options
+	manifest     manifest.State
+	appliedIndex uint64
+	durableIndex uint64
+	closed       bool
 }
 
 // Open creates or opens a database at path.
@@ -43,6 +64,9 @@ func Open(path string, opts *Options) (*DB, error) {
 	}
 	mem := memtable.New()
 	if path == "" {
+		if opts.DurabilityMode == DurabilityReplica {
+			return nil, fmt.Errorf("replica durability requires a persistent path")
+		}
 		return &DB{mem: mem, opts: opts}, nil
 	}
 
@@ -50,9 +74,16 @@ func Open(path string, opts *Options) (*DB, error) {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 
-	readers, nextSST, err := openSSTables(path)
+	readers, manifestState, err := openSSTables(path)
 	if err != nil {
 		return nil, err
+	}
+	if opts.DurabilityMode == DurabilityReplica {
+		return &DB{
+			mem: mem, path: path, readers: readers, nextSST: manifestState.NextSST,
+			opts: opts, manifest: manifestState, appliedIndex: manifestState.AppliedIndex,
+			durableIndex: manifestState.AppliedIndex,
+		}, nil
 	}
 
 	w, err := wal.Open(filepath.Join(path, "wal"))
@@ -83,12 +114,13 @@ func Open(path string, opts *Options) (*DB, error) {
 	}
 
 	return &DB{
-		mem:     mem,
-		log:     w,
-		path:    path,
-		readers: readers,
-		nextSST: nextSST,
-		opts:    opts,
+		mem:      mem,
+		log:      w,
+		path:     path,
+		readers:  readers,
+		nextSST:  manifestState.NextSST,
+		opts:     opts,
+		manifest: manifestState,
 	}, nil
 }
 
@@ -96,6 +128,9 @@ func Open(path string, opts *Options) (*DB, error) {
 // Returns (nil, false) when the key does not exist or has been deleted.
 // The memtable is checked first; if not found, SSTables are searched newest-first.
 func (db *DB) Get(key string) ([]byte, bool) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	// A memtable tombstone beats any older SSTable value.
 	if r, ok := db.mem.GetRecord(key); ok {
 		if r.Type == memtable.RecordTypeDelete {
@@ -124,6 +159,9 @@ func (db *DB) Get(key string) ([]byte, bool) {
 func (db *DB) Set(key string, value []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if db.opts.DurabilityMode == DurabilityReplica {
+		return errors.New("Set is unavailable in replica mode; use ApplyBatch")
+	}
 
 	seq := db.mem.AllocSeq()
 	if db.log != nil {
@@ -142,6 +180,9 @@ func (db *DB) Set(key string, value []byte) error {
 func (db *DB) Delete(key string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if db.opts.DurabilityMode == DurabilityReplica {
+		return errors.New("Delete is unavailable in replica mode; use ApplyBatch")
+	}
 
 	seq := db.mem.AllocSeq()
 	if db.log != nil {
@@ -152,6 +193,59 @@ func (db *DB) Delete(key string) error {
 	db.mem.SetRaw(memtable.Record{Key: key, SeqNum: seq, Type: memtable.RecordTypeDelete})
 
 	return db.maybeFlush()
+}
+
+// ApplyBatch atomically applies mutations at a committed external log index.
+// Reapplying an already applied index is a no-op; gaps are rejected.
+func (db *DB) ApplyBatch(index uint64, mutations []Mutation) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.opts.DurabilityMode != DurabilityReplica {
+		return errors.New("ApplyBatch requires replica durability mode")
+	}
+	if index == 0 {
+		return errors.New("apply index must be greater than zero")
+	}
+	if index <= db.appliedIndex {
+		return nil
+	}
+	if index != db.appliedIndex+1 {
+		return fmt.Errorf("apply index gap: got %d, want %d", index, db.appliedIndex+1)
+	}
+	for _, mutation := range mutations {
+		if mutation.Key == "" {
+			return errors.New("mutation key must not be empty")
+		}
+		if mutation.Type != MutationPut && mutation.Type != MutationDelete {
+			return fmt.Errorf("unknown mutation type %d", mutation.Type)
+		}
+	}
+	for _, mutation := range mutations {
+		recordType := memtable.RecordTypePut
+		if mutation.Type == MutationDelete {
+			recordType = memtable.RecordTypeDelete
+		}
+		db.mem.SetRaw(memtable.Record{
+			Key: mutation.Key, Value: append([]byte(nil), mutation.Value...),
+			SeqNum: index, Type: recordType,
+		})
+	}
+	db.appliedIndex = index
+	return db.maybeFlush()
+}
+
+// AppliedIndex is the highest external index applied to the in-memory state.
+func (db *DB) AppliedIndex() uint64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.appliedIndex
+}
+
+// DurableIndex is the highest external index published through the manifest.
+func (db *DB) DurableIndex() uint64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.durableIndex
 }
 
 // Scan returns all live key-value pairs where from <= key <= to, sorted ascending.
@@ -195,6 +289,8 @@ func (db *DB) Scan(from, to string) ([]KVPair, error) {
 // SSTableCount returns the number of SSTable files currently open.
 // Intended for testing and diagnostics.
 func (db *DB) SSTableCount() int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 	return len(db.readers)
 }
 
@@ -202,6 +298,8 @@ func (db *DB) SSTableCount() int {
 // returned false during a Get, saving a disk scan.
 // Intended for testing and diagnostics.
 func (db *DB) BloomSkips() int64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 	var total int64
 	for _, r := range db.readers {
 		total += r.BloomSkips()
@@ -229,6 +327,18 @@ func (db *DB) ForceCompact() error {
 
 // Close syncs the WAL to disk and releases all file descriptors.
 func (db *DB) Close() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return nil
+	}
+	if db.opts.DurabilityMode == DurabilityReplica {
+		if err := db.flush(); err != nil {
+			return err
+		}
+	}
+	db.closed = true
+
 	var firstErr error
 	for _, r := range db.readers {
 		if err := r.Close(); err != nil && firstErr == nil {
@@ -263,11 +373,24 @@ func (db *DB) maybeFlush() error {
 func (db *DB) flush() error {
 	records := db.mem.SortedEntries()
 	if len(records) == 0 {
+		if db.opts.DurabilityMode == DurabilityReplica && db.appliedIndex > db.durableIndex {
+			state := db.manifest
+			state.AppliedIndex = db.appliedIndex
+			if err := manifest.Store(db.path, state); err != nil {
+				return fmt.Errorf("publish applied index: %w", err)
+			}
+			db.manifest = state
+			db.durableIndex = db.appliedIndex
+		}
+		return nil
+	}
+	if db.path == "" {
 		return nil
 	}
 
 	db.nextSST++
-	sstPath := filepath.Join(db.path, fmt.Sprintf("%06d.sst", db.nextSST))
+	sstName := fmt.Sprintf("%06d.sst", db.nextSST)
+	sstPath := filepath.Join(db.path, sstName)
 
 	if err := sstable.Write(sstPath, records); err != nil {
 		db.nextSST--
@@ -276,11 +399,30 @@ func (db *DB) flush() error {
 
 	r, err := sstable.Open(sstPath)
 	if err != nil {
+		db.nextSST--
+		_ = os.Remove(sstPath)
 		return fmt.Errorf("open flushed sstable: %w", err)
+	}
+
+	state := db.manifest
+	state.SSTables = append(append([]string(nil), state.SSTables...), sstName)
+	state.NextSST = db.nextSST
+	if db.opts.DurabilityMode == DurabilityReplica {
+		state.AppliedIndex = db.appliedIndex
+	}
+	if err := manifest.Store(db.path, state); err != nil {
+		_ = r.Close()
+		_ = os.Remove(sstPath)
+		db.nextSST--
+		return fmt.Errorf("publish flush manifest: %w", err)
 	}
 
 	db.readers = append([]*sstable.Reader{r}, db.readers...)
 	db.mem = memtable.NewWithSeq(db.mem.NextSeq())
+	db.manifest = state
+	if db.opts.DurabilityMode == DurabilityReplica {
+		db.durableIndex = db.appliedIndex
+	}
 
 	if db.log != nil {
 		if err := db.log.Reset(); err != nil {
@@ -331,15 +473,28 @@ func (db *DB) compact() error {
 
 	// Open the new reader only if the output file was actually created.
 	var newReaders []*sstable.Reader
+	var newNames []string
 	if recordsOut > 0 {
 		nr, err := sstable.Open(outPath)
 		if err != nil {
 			return fmt.Errorf("open compacted sstable: %w", err)
 		}
 		newReaders = []*sstable.Reader{nr}
-	} else {
-		// All records were tombstones — no output file. Roll back the sequence number.
+		newNames = []string{filepath.Base(outPath)}
+	}
+
+	state := db.manifest
+	state.SSTables = newNames
+	state.NextSST = db.nextSST
+	if err := manifest.Store(db.path, state); err != nil {
+		for _, r := range newReaders {
+			_ = r.Close()
+		}
+		if recordsOut > 0 {
+			_ = os.Remove(outPath)
+		}
 		db.nextSST--
+		return fmt.Errorf("publish compaction manifest: %w", err)
 	}
 
 	// Close old readers then delete their files.
@@ -351,6 +506,7 @@ func (db *DB) compact() error {
 	}
 
 	db.readers = newReaders
+	db.manifest = state
 
 	log.Printf("[compact] %d files, %d records in → %d records out (%s)",
 		filesIn, recordsIn, recordsOut, filepath.Base(outPath))
@@ -362,19 +518,33 @@ func (db *DB) compact() error {
 
 // openSSTables scans path for *.sst files, opens them newest-first, and returns
 // the reader slice plus the sequence number of the newest file found.
-func openSSTables(path string) ([]*sstable.Reader, uint64, error) {
-	entries, err := os.ReadDir(path)
+func openSSTables(path string) ([]*sstable.Reader, manifest.State, error) {
+	state, ok, err := manifest.Load(path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read db dir: %w", err)
+		return nil, manifest.State{}, err
 	}
-
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sst") {
-			names = append(names, e.Name())
+	if !ok {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return nil, manifest.State{}, fmt.Errorf("read db dir: %w", err)
+		}
+		var names []string
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".sst") {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		state = manifest.New()
+		state.SSTables = names
+		if len(names) > 0 {
+			_, _ = fmt.Sscanf(names[len(names)-1], "%d.sst", &state.NextSST)
+		}
+		if err := manifest.Store(path, state); err != nil {
+			return nil, manifest.State{}, fmt.Errorf("bootstrap manifest: %w", err)
 		}
 	}
-	sort.Strings(names) // lexicographic == numeric for zero-padded names
+	names := state.SSTables
 
 	readers := make([]*sstable.Reader, 0, len(names))
 	for i := len(names) - 1; i >= 0; i-- {
@@ -383,15 +553,10 @@ func openSSTables(path string) ([]*sstable.Reader, uint64, error) {
 			for _, opened := range readers {
 				opened.Close() //nolint:errcheck
 			}
-			return nil, 0, fmt.Errorf("open sstable %s: %w", names[i], err)
+			return nil, manifest.State{}, fmt.Errorf("open sstable %s: %w", names[i], err)
 		}
 		readers = append(readers, r)
 	}
 
-	var nextSST uint64
-	if len(names) > 0 {
-		fmt.Sscanf(names[len(names)-1], "%d.sst", &nextSST)
-	}
-
-	return readers, nextSST, nil
+	return readers, state, nil
 }

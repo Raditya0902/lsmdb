@@ -206,26 +206,26 @@ in this merge.
 ### File lifecycle
 
 ```
-1. Write merged SSTable to nextSST path  (fully fsynced)
-2. Open new reader
-3. Close all old readers
-4. os.Remove all old files
-5. Replace db.readers with [newReader]
+1. Write merged SSTable to nextSST path (fully fsynced)
+2. Open the replacement reader
+3. Atomically publish a MANIFEST containing only the replacement
+4. Replace db.readers with the new reader
+5. Close and remove files from the old manifest generation
 ```
 
-If the process crashes between steps 1 and 4, the old files still exist. On reopen,
-both old and new files are loaded. Sequence number ordering ensures the new file's
-records shadow the old files' records, producing correct results. The old files are
-not cleaned up — this is a known limitation (a manifest would fix it).
+If the process crashes before step 3, recovery uses the old manifest and ignores the
+unpublished output. If it crashes after step 3, recovery uses the replacement and
+ignores any old files not yet removed. File membership never depends on a directory
+scan after the initial migration of a pre-manifest database.
 
 ---
 
 ## Crash recovery
 
-On `Open(path, opts)`:
+On embedded `Open(path, opts)`:
 
-1. Scan the directory for `*.sst` files, sort lexicographically (= chronologically),
-   open each as a reader newest-first.
+1. Load the published manifest and open its SSTables newest-first. If an older
+   database has no manifest, bootstrap one from its existing files once.
 2. Replay the WAL: `ReadAll` reads every record, skipping truncated trailing records
    and records with bad CRCs. After replay, the WAL is truncated to the last valid
    record boundary.
@@ -301,10 +301,10 @@ These rules are enforced throughout and must not be violated by any future chang
    Since `Add` sets all `k` positions for every key, a key that was added can never
    trigger a false negative. This is a mathematical guarantee, not a probabilistic one.
 
-4. **SSTables are immutable — never edit in place.**
-   Compaction creates new files and deletes old ones. No existing SSTable file is
-   ever opened for writing. This makes crash recovery safe: partial compactions leave
-   the old files intact.
+4. **SSTables are immutable and manifest publication is atomic.**
+   Flush and compaction create and sync new files, atomically publish the complete
+   live file set through `MANIFEST`, then remove obsolete files. Recovery observes
+   either the old or new generation, never an inferred mixture.
 
 5. **WAL must be replayed before any reads on startup.**
    `Open` replays the WAL before returning the `*DB`. There is no code path that
@@ -313,11 +313,46 @@ These rules are enforced throughout and must not be violated by any future chang
 
 ---
 
+## Replicated state machine
+
+Replica mode uses the Raft log rather than the embedded WAL as its recovery
+authority. Every committed Raft index is also the LSM sequence number. The LSM
+manifest records the highest index represented by its published SSTable set, so
+restart replays only committed log entries beyond that watermark.
+
+The consensus module is deterministic and performs no networking or file I/O. A
+single runtime event loop feeds it ticks and messages, persists emitted hard-state
+and log effects, sends resulting messages, and applies committed entries in order.
+The production adapters are gRPC and a disk-backed stable store; tests also use a
+faultable in-memory transport.
+
+### Election and partition behavior
+
+- Randomized election timeouts begin with pre-vote, which does not increment term.
+- A candidate persists its new term and self-vote before requesting votes.
+- A leader appends a no-op in its term and commits only current-term entries by a
+  majority `matchIndex`; earlier entries become committed with that prefix.
+- Followers reject mismatched prefixes with a conflict hint. Leaders move
+  `nextIndex` backward and replace only uncommitted conflicting suffixes.
+- Successful append responses track recent quorum activity. A leader that cannot
+  confirm a majority within the configured interval steps down.
+
+### Write and read guarantees
+
+A write response is sent only after its entry is persisted by a majority,
+committed, and applied to the leader's LSM state machine. Each command contains a
+client ID and monotonically increasing request sequence. Session metadata is
+applied in the same externally indexed batch as the user mutation, so an older
+retry becomes a no-op even after restart or failover.
+
+A `Get` is served only by a leader that has committed an entry in its current
+term. It sends a contextual heartbeat, waits for a current-term quorum response,
+captures the commit index, waits until that index is applied locally, and then
+reads the LSM state. A partitioned leader therefore cannot serve a successful
+linearizable read.
+
 ## Known limitations
 
-- **No manifest.** SSTable membership is inferred by directory scan. A crash during
-  compaction (between writing the new SSTable and deleting the old ones) leaves stale
-  files that are never cleaned up.
 - **Single writer.** `db.mu` is a single mutex covering the entire write path. There
   is no lock-free or MVCC read path.
 - **Flat SSTable list.** All SSTables are at one logical level. Leveled compaction
@@ -325,6 +360,9 @@ These rules are enforced throughout and must not be violated by any future chang
   for large datasets.
 - **No fsync per WAL append.** `Close()` fsyncs the WAL file. Between the last flush
   and a power failure, recent writes can be lost.
-- **No range scans.** The public API has no iterator. The sparse index and sorted
-  SSTable layout would support range scans, but the API does not expose them.
+- **No distributed range scans.** Embedded range scans exist, but the network
+  interface intentionally exposes only point operations in the MVP.
 - **No compression.** All bytes are stored verbatim.
+- **No snapshots or Raft log compaction.** The replicated log grows until these are added.
+- **Static membership and plaintext transport.** Dynamic membership, TLS, authentication,
+  and rolling upgrades are deferred.

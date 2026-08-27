@@ -4,7 +4,7 @@ Last updated: 2026-08-26
 
 ## Current Phase
 
-MVP complete — deferred work is listed in `plan.md` and `context.md`.
+Raft snapshot and log-compaction milestone complete and verified.
 
 ## Completed
 
@@ -29,6 +29,12 @@ MVP complete — deferred work is listed in `plan.md` and `context.md`.
 - [x] Add a faultable in-memory transport with partition, drop, delay, pause, and reorder controls.
 - [x] Add repeated failover tests, Docker smoke automation, race/vet CI, and cluster benchmark.
 - [x] Record measured local throughput/latency/failover results and update public design documentation.
+- [x] Add atomic logical LSM snapshot export and replacement, including client-session metadata.
+- [x] Add CRC-protected durable Raft snapshots and prefix log compaction.
+- [x] Add snapshot-aware Raft indexing and `InstallSnapshot` follower catch-up.
+- [x] Restore a newer durable Raft snapshot into the LSM state machine on restart.
+- [x] Trigger snapshots after a configurable applied-entry threshold (default 1,000).
+- [x] Expose snapshot index and retained-log length through status and Prometheus.
 
 ## In Progress
 
@@ -102,11 +108,19 @@ MVP complete — deferred work is listed in `plan.md` and `context.md`.
 - 2026-08-26 — `docker compose config` — PASS.
 - 2026-08-26 — `./scripts/docker-smoke.sh` with leader stop/restart — PASS.
 - 2026-08-26 — local cluster benchmark, 1,000 × 128-byte writes — 98.0 ops/sec, P99 16.23 ms, failover 113.77 ms, 0 failures.
+- 2026-08-26 — snapshot/log-compaction unit and crash-window recovery tests — PASS.
+- 2026-08-26 — offline-follower `InstallSnapshot` catch-up test, three consecutive runs — PASS.
+- 2026-08-26 — post-snapshot `go test ./...` — PASS.
+- 2026-08-26 — post-snapshot `go test -race ./...` — PASS.
+- 2026-08-26 — post-snapshot `go vet ./...` — PASS.
+- 2026-08-26 — post-snapshot `docker compose config` — PASS.
+- 2026-08-26 — post-snapshot `./scripts/docker-smoke.sh` leader failover/restart — PASS.
 
 ## Blockers
 
-None for the MVP. Snapshots and Raft log compaction remain explicitly deferred.
+None. Snapshot transfer is currently a single bounded gRPC message (256 MiB maximum);
+chunked streaming is a future scalability improvement, not a correctness blocker.
 
 ## Next Task
 
-Implement snapshots and Raft log compaction as the next milestone.
+Add joint-consensus membership changes or streamed snapshot transfer.

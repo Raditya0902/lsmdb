@@ -118,3 +118,79 @@ func TestThreeNodeWriteReadFailoverAndRecovery(t *testing.T) {
 	}
 	t.Fatalf("restarted node did not converge to index %d", write.LogIndex)
 }
+
+func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
+	addresses := map[uint64]string{1: freeAddress(t), 2: freeAddress(t), 3: freeAddress(t)}
+	configs := make(map[uint64]NodeConfig)
+	nodes := make(map[uint64]*Node)
+	for id := uint64(1); id <= 3; id++ {
+		configs[id] = NodeConfig{ID: id, ListenAddress: addresses[id], DataDir: fmt.Sprintf("%s/node-%d", t.TempDir(), id), Peers: addresses, TickInterval: 20 * time.Millisecond, ElectionTickMin: 5, ElectionTickMax: 10, HeartbeatTicks: 1, CheckQuorumTicks: 5, SnapshotThreshold: 3}
+		node, err := StartNode(configs[id])
+		if err != nil {
+			t.Fatalf("StartNode(%d): %v", id, err)
+		}
+		nodes[id] = node
+	}
+	defer func() {
+		for _, node := range nodes {
+			if node != nil {
+				_ = node.Close()
+			}
+		}
+	}()
+	leaderID := waitForLeader(t, nodes, 0)
+	offlineID := uint64(1)
+	if offlineID == leaderID {
+		offlineID = 2
+	}
+	if err := nodes[offlineID].Close(); err != nil {
+		t.Fatal(err)
+	}
+	nodes[offlineID] = nil
+	client, err := NewClient([]string{addresses[leaderID]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	var lastIndex uint64
+	for i := 1; i <= 8; i++ {
+		result, err := client.Put(ctx, []byte("snapshot-key"), []byte(fmt.Sprintf("value-%d", i)))
+		if err != nil {
+			t.Fatalf("Put(%d): %v", i, err)
+		}
+		lastIndex = result.LogIndex
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := nodes[leaderID].Status(ctx)
+		if err == nil && status.SnapshotIndex >= lastIndex {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	leaderStatus, err := nodes[leaderID].Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaderStatus.SnapshotIndex < lastIndex {
+		t.Fatalf("leader did not compact through %d: %+v", lastIndex, leaderStatus)
+	}
+	restarted, err := StartNode(configs[offlineID])
+	if err != nil {
+		t.Fatalf("restart follower: %v", err)
+	}
+	nodes[offlineID] = restarted
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, statusErr := restarted.Status(ctx)
+		value, found, readErr := restarted.machine.Get([]byte("snapshot-key"))
+		if statusErr == nil && readErr == nil && found && string(value) == "value-8" && status.SnapshotIndex >= lastIndex && restarted.machine.AppliedIndex() >= lastIndex {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	status, _ := restarted.Status(context.Background())
+	t.Fatalf("follower did not install snapshot through %d: status=%+v applied=%d", lastIndex, status, restarted.machine.AppliedIndex())
+}

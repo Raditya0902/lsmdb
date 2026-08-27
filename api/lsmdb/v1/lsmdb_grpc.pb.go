@@ -235,7 +235,8 @@ var KV_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	Raft_Send_FullMethodName = "/lsmdb.v1.Raft/Send"
+	Raft_Send_FullMethodName            = "/lsmdb.v1.Raft/Send"
+	Raft_InstallSnapshot_FullMethodName = "/lsmdb.v1.Raft/InstallSnapshot"
 )
 
 // RaftClient is the client API for Raft service.
@@ -243,6 +244,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RaftClient interface {
 	Send(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftAck, error)
+	InstallSnapshot(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftAck, error)
 }
 
 type raftClient struct {
@@ -263,11 +265,22 @@ func (c *raftClient) Send(ctx context.Context, in *RaftMessage, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *raftClient) InstallSnapshot(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftAck, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RaftAck)
+	err := c.cc.Invoke(ctx, Raft_InstallSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RaftServer is the server API for Raft service.
 // All implementations must embed UnimplementedRaftServer
 // for forward compatibility.
 type RaftServer interface {
 	Send(context.Context, *RaftMessage) (*RaftAck, error)
+	InstallSnapshot(context.Context, *RaftMessage) (*RaftAck, error)
 	mustEmbedUnimplementedRaftServer()
 }
 
@@ -280,6 +293,9 @@ type UnimplementedRaftServer struct{}
 
 func (UnimplementedRaftServer) Send(context.Context, *RaftMessage) (*RaftAck, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Send not implemented")
+}
+func (UnimplementedRaftServer) InstallSnapshot(context.Context, *RaftMessage) (*RaftAck, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InstallSnapshot not implemented")
 }
 func (UnimplementedRaftServer) mustEmbedUnimplementedRaftServer() {}
 func (UnimplementedRaftServer) testEmbeddedByValue()              {}
@@ -320,6 +336,24 @@ func _Raft_Send_Handler(srv interface{}, ctx context.Context, dec func(interface
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Raft_InstallSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RaftMessage)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServer).InstallSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Raft_InstallSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServer).InstallSnapshot(ctx, req.(*RaftMessage))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Raft_ServiceDesc is the grpc.ServiceDesc for Raft service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -330,6 +364,10 @@ var Raft_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Send",
 			Handler:    _Raft_Send_Handler,
+		},
+		{
+			MethodName: "InstallSnapshot",
+			Handler:    _Raft_InstallSnapshot_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

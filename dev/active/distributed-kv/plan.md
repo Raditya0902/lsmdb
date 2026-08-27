@@ -26,6 +26,10 @@ buildable and tested.
 7. **Faults and evidence** — add deterministic partitions/crashes, Docker
    failover coverage, race CI, and reproducible throughput/latency/failover
    benchmarks; update public documentation with measured results.
+8. **Snapshots and bounded logs** — atomically snapshot the logical LSM state,
+   persist CRC-protected snapshot metadata/data, compact the durable Raft prefix,
+   install snapshots on lagging followers, and recover across interrupted
+   snapshot/log publication.
 
 ## Network Interface
 
@@ -56,6 +60,6 @@ Followers return a typed leader hint. Keys are at most 16 KiB and values at most
 
 ## Deferred
 
-Snapshots, `InstallSnapshot`, Raft log compaction, five-node deployment, dynamic
-membership, distributed scans, stale follower reads, sharding/multi-Raft, TLS,
+Five-node deployment, dynamic membership, distributed scans, stale follower
+reads, sharding/multi-Raft, streamed snapshots larger than 256 MiB, TLS,
 authentication, and rolling upgrades follow the MVP.

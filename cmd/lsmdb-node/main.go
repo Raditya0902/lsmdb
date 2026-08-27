@@ -19,6 +19,7 @@ func main() {
 	metrics := flag.String("metrics", "", "Prometheus/health HTTP listen address")
 	dataDir := flag.String("data-dir", "", "persistent node data directory")
 	peerList := flag.String("peers", "", "comma-separated static peers: 1=host:port,2=host:port")
+	snapshotThreshold := flag.Uint64("snapshot-threshold", 1000, "applied entries between Raft snapshots (0 uses default)")
 	flag.Parse()
 
 	peers, err := parsePeers(*peerList)
@@ -27,7 +28,7 @@ func main() {
 	}
 	node, err := cluster.StartNode(cluster.NodeConfig{
 		ID: *id, ListenAddress: *listen, MetricsAddress: *metrics,
-		DataDir: *dataDir, Peers: peers,
+		DataDir: *dataDir, Peers: peers, SnapshotThreshold: *snapshotThreshold,
 	})
 	if err != nil {
 		log.Fatal(err)

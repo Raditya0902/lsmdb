@@ -55,6 +55,15 @@ distributed scan consistency and pagination interface.
 Expose Prometheus metrics and include provisioned Prometheus/Grafana resources in
 Docker Compose. Performance statements must come from reproducible benchmarks.
 
+### D011 — Logical LSM snapshots define the Raft compaction boundary
+
+Snapshots serialize the live user and client-session namespaces at one committed
+Raft index. The stable store atomically publishes the CRC-protected snapshot
+before rewriting the log suffix. A lagging follower installs the snapshot into a
+new SSTable generation through the manifest, then resumes AppendEntries at the
+next index. This keeps snapshot format independent of host paths and obsolete
+SSTable generations while preserving retry deduplication across recovery.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

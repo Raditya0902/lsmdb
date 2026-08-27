@@ -103,3 +103,95 @@ func TestStoreDropsTruncatedTailOnRecovery(t *testing.T) {
 		t.Fatalf("append after recovery: %v", err)
 	}
 }
+
+func TestStorePersistsSnapshotAndCompactsPrefix(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Persist(raft.Update{Entries: []raft.Entry{{Index: 1, Term: 1, Data: []byte("one")}, {Index: 2, Term: 1, Data: []byte("two")}, {Index: 3, Term: 2, Data: []byte("three")}}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := raft.Snapshot{Index: 2, Term: 1, Data: []byte("state")}
+	if err := store.Persist(raft.Update{Snapshot: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got := reopened.LoadSnapshot()
+	if got.Index != 2 || got.Term != 1 || string(got.Data) != "state" {
+		t.Fatalf("snapshot = %#v", got)
+	}
+	_, entries := reopened.Load()
+	if len(entries) != 1 || entries[0].Index != 3 {
+		t.Fatalf("retained entries = %#v", entries)
+	}
+	if err := reopened.Persist(raft.Update{Entries: []raft.Entry{{Index: 4, Term: 2}}}); err != nil {
+		t.Fatalf("append after compaction: %v", err)
+	}
+}
+
+func TestStoreRejectsCorruptSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := raft.Snapshot{Index: 1, Term: 1, Data: []byte("state")}
+	if err := store.Persist(raft.Update{Entries: []raft.Entry{{Index: 1, Term: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Persist(raft.Update{Snapshot: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, snapshotFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-1] ^= 0xff
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open accepted corrupt snapshot")
+	}
+}
+
+func TestStoreRecoversSnapshotPublishedBeforeLogRewrite(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Persist(raft.Update{Entries: []raft.Entry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 2, Data: []byte("suffix")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Model a crash after the atomic snapshot rename but before raft.log rewrite.
+	if err := storeSnapshot(dir, raft.Snapshot{Index: 2, Term: 1, Data: []byte("state")}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	_, entries := reopened.Load()
+	if len(entries) != 1 || entries[0].Index != 3 || string(entries[0].Data) != "suffix" {
+		t.Fatalf("recovered suffix = %#v", entries)
+	}
+}

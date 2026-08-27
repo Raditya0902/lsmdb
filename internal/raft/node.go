@@ -14,6 +14,7 @@ type Node struct {
 	term     uint64
 	votedFor uint64
 	leaderID uint64
+	snapshot Snapshot
 	log      []Entry
 	commit   uint64
 
@@ -31,13 +32,23 @@ type Node struct {
 }
 
 // New constructs a node from durable hard state and log entries.
-func New(cfg Config, hard HardState, entries []Entry) (*Node, error) {
+func New(cfg Config, hard HardState, entries []Entry, restored ...Snapshot) (*Node, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	var snapshot Snapshot
+	if len(restored) > 1 {
+		return nil, fmt.Errorf("at most one restored snapshot is allowed")
+	}
+	if len(restored) == 1 {
+		snapshot = cloneSnapshot(restored[0])
+		if (snapshot.Index == 0) != (snapshot.Term == 0) || (snapshot.Index == 0 && len(snapshot.Data) != 0) {
+			return nil, fmt.Errorf("restored snapshot requires positive index and term")
+		}
+	}
 	log := make([]Entry, len(entries))
 	for i, entry := range entries {
-		if entry.Index != uint64(i+1) || entry.Term == 0 {
+		if entry.Index != snapshot.Index+uint64(i)+1 || entry.Term == 0 {
 			return nil, fmt.Errorf("raft log is not contiguous at position %d", i)
 		}
 		log[i] = cloneEntry(entry)
@@ -47,7 +58,7 @@ func New(cfg Config, hard HardState, entries []Entry) (*Node, error) {
 	cfg.Peers = peers
 	n := &Node{
 		cfg: cfg, role: Follower, term: hard.Term, votedFor: hard.VotedFor,
-		log: log, commit: cfg.AppliedIndex, random: cfg.RandomSeed, votes: make(map[uint64]bool),
+		snapshot: snapshot, log: log, commit: cfg.AppliedIndex, random: cfg.RandomSeed, votes: make(map[uint64]bool),
 		nextIndex: make(map[uint64]uint64), matchIndex: make(map[uint64]uint64),
 		recentActive: make(map[uint64]bool),
 		peersSet:     make(map[uint64]struct{}, len(peers)),
@@ -60,8 +71,8 @@ func New(cfg Config, hard HardState, entries []Entry) (*Node, error) {
 			return nil, fmt.Errorf("durable vote references non-member %d", hard.VotedFor)
 		}
 	}
-	if cfg.AppliedIndex > uint64(len(log)) {
-		return nil, fmt.Errorf("applied index %d exceeds last log index %d", cfg.AppliedIndex, len(log))
+	if cfg.AppliedIndex < snapshot.Index || cfg.AppliedIndex > n.lastIndex() {
+		return nil, fmt.Errorf("applied index %d is outside snapshot/log range [%d,%d]", cfg.AppliedIndex, snapshot.Index, n.lastIndex())
 	}
 	if n.random == 0 {
 		n.random = cfg.ID*6364136223846793005 + 1442695040888963407
@@ -135,8 +146,30 @@ func (n *Node) Step(message Message) Update {
 		update.merge(n.handleAppend(message))
 	case MsgAppendResponse:
 		update.merge(n.handleAppendResponse(message))
+	case MsgSnapshot:
+		update.merge(n.handleSnapshot(message))
+	case MsgSnapshotResponse:
+		update.merge(n.handleSnapshotResponse(message))
 	}
 	return update
+}
+
+// Compact installs a locally-created snapshot boundary and discards its log prefix.
+func (n *Node) Compact(snapshot Snapshot) (Update, error) {
+	if snapshot.Index <= n.snapshot.Index {
+		return Update{}, nil
+	}
+	if snapshot.Index > n.commit || snapshot.Term == 0 || n.termAt(snapshot.Index) != snapshot.Term {
+		return Update{}, fmt.Errorf("invalid snapshot boundary %d/%d at commit %d", snapshot.Index, snapshot.Term, n.commit)
+	}
+	n.compactLog(snapshot)
+	copy := cloneSnapshot(snapshot)
+	return Update{Snapshot: &copy}, nil
+}
+
+// CreateSnapshot binds opaque state-machine bytes to a committed log term.
+func (n *Node) CreateSnapshot(index uint64, data []byte) (Update, error) {
+	return n.Compact(Snapshot{Index: index, Term: n.termAt(index), Data: append([]byte(nil), data...)})
 }
 
 // Propose appends a command on the leader and starts replication.
@@ -179,6 +212,7 @@ func (n *Node) Status() Status {
 	status := Status{
 		ID: n.cfg.ID, Role: n.role, Term: n.term, LeaderID: n.leaderID,
 		CommitIndex: n.commit, LastLogIndex: n.lastIndex(), VotedFor: n.votedFor,
+		SnapshotIndex: n.snapshot.Index, RetainedLogEntries: uint64(len(n.log)),
 	}
 	if n.role == Leader {
 		status.MatchIndex = make(map[uint64]uint64, len(n.matchIndex))
@@ -357,7 +391,7 @@ func (n *Node) handleAppend(message Message) Update {
 		if message.LogIndex <= n.lastIndex() {
 			conflictTerm := n.termAt(message.LogIndex)
 			hint = message.LogIndex
-			for hint > 1 && n.termAt(hint-1) == conflictTerm {
+			for hint > n.snapshot.Index+1 && n.termAt(hint-1) == conflictTerm {
 				hint--
 			}
 		}
@@ -381,7 +415,7 @@ func (n *Node) handleAppend(message Message) Update {
 			if n.termAt(entry.Index) == entry.Term {
 				continue
 			}
-			n.log = n.log[:entry.Index-1]
+			n.log = n.log[:entry.Index-n.snapshot.Index-1]
 			update.TruncateFrom = entry.Index
 		}
 		for _, remaining := range message.Entries[i:] {
@@ -404,6 +438,58 @@ func (n *Node) handleAppend(message Message) Update {
 		Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term,
 		LogIndex: lastNew, Context: message.Context,
 	})
+	return update
+}
+
+func (n *Node) handleSnapshot(message Message) Update {
+	if message.Snapshot == nil || message.Snapshot.Index == 0 || message.Snapshot.Term == 0 {
+		return Update{Messages: []Message{{Type: MsgSnapshotResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.lastIndex() + 1}}}
+	}
+	update := Update{}
+	if n.role != Follower || n.leaderID != message.From {
+		update.merge(n.becomeFollower(n.term, message.From))
+	}
+	n.leaderID = message.From
+	n.resetElectionTimer()
+	snapshot := cloneSnapshot(*message.Snapshot)
+	if snapshot.Index > n.snapshot.Index {
+		if snapshot.Index <= n.commit && n.termAt(snapshot.Index) != snapshot.Term {
+			update.Messages = append(update.Messages, Message{
+				Type: MsgSnapshotResponse, From: n.cfg.ID, To: message.From, Term: n.term,
+				Reject: true, RejectHint: n.lastIndex() + 1,
+			})
+			return update
+		}
+		n.compactLog(snapshot)
+		if n.commit < snapshot.Index {
+			n.commit = snapshot.Index
+		}
+		update.Snapshot = &snapshot
+	}
+	update.Messages = append(update.Messages, Message{
+		Type: MsgSnapshotResponse, From: n.cfg.ID, To: message.From, Term: n.term,
+		LogIndex: max(snapshot.Index, n.snapshot.Index),
+	})
+	return update
+}
+
+func (n *Node) handleSnapshotResponse(message Message) Update {
+	if n.role != Leader || message.Term != n.term {
+		return Update{}
+	}
+	n.recentActive[message.From] = true
+	if message.Reject {
+		return Update{Messages: []Message{n.appendMessage(message.From, 0)}}
+	}
+	matched := min(message.LogIndex, n.lastIndex())
+	if matched > n.matchIndex[message.From] {
+		n.matchIndex[message.From] = matched
+		n.nextIndex[message.From] = matched + 1
+	}
+	update := n.maybeCommit()
+	if n.nextIndex[message.From] <= n.lastIndex() {
+		update.Messages = append(update.Messages, n.appendMessage(message.From, 0))
+	}
 	return update
 }
 
@@ -466,6 +552,10 @@ func (n *Node) appendMessage(peer, context uint64) Message {
 	if next == 0 {
 		next = n.lastIndex() + 1
 	}
+	if next <= n.snapshot.Index {
+		snapshot := cloneSnapshot(n.snapshot)
+		return Message{Type: MsgSnapshot, From: n.cfg.ID, To: peer, Term: n.term, Snapshot: &snapshot}
+	}
 	return Message{
 		Type: MsgAppend, From: n.cfg.ID, To: peer, Term: n.term,
 		LogIndex: next - 1, LogTerm: n.termAt(next - 1),
@@ -482,6 +572,8 @@ func (n *Node) rejectStale(message Message) Message {
 	case MsgAppend:
 		response.Type = MsgAppendResponse
 		response.RejectHint = n.lastIndex() + 1
+	case MsgSnapshot:
+		response.Type = MsgSnapshotResponse
 	default:
 		response.Type = message.Type
 	}
@@ -510,28 +602,40 @@ func (n *Node) isUpToDate(index, term uint64) bool {
 	return term > localTerm || (term == localTerm && index >= n.lastIndex())
 }
 
-func (n *Node) lastIndex() uint64 { return uint64(len(n.log)) }
+func (n *Node) lastIndex() uint64 { return n.snapshot.Index + uint64(len(n.log)) }
 
 func (n *Node) termAt(index uint64) uint64 {
 	if index == 0 {
 		return 0
 	}
-	if index > uint64(len(n.log)) {
+	if index == n.snapshot.Index {
+		return n.snapshot.Term
+	}
+	if index <= n.snapshot.Index || index > n.lastIndex() {
 		return 0
 	}
-	return n.log[index-1].Term
+	return n.log[index-n.snapshot.Index-1].Term
 }
 
 func (n *Node) entriesBetween(from, to uint64) []Entry {
-	if from >= to || from == 0 || from > uint64(len(n.log)) {
+	if from >= to || from <= n.snapshot.Index || from > n.lastIndex() {
 		return nil
 	}
-	to = min(to, uint64(len(n.log))+1)
+	to = min(to, n.lastIndex()+1)
 	entries := make([]Entry, 0, to-from)
-	for _, entry := range n.log[from-1 : to-1] {
+	for _, entry := range n.log[from-n.snapshot.Index-1 : to-n.snapshot.Index-1] {
 		entries = append(entries, cloneEntry(entry))
 	}
 	return entries
+}
+
+func (n *Node) compactLog(snapshot Snapshot) {
+	var suffix []Entry
+	if snapshot.Index < n.lastIndex() && n.termAt(snapshot.Index) == snapshot.Term {
+		suffix = n.entriesBetween(snapshot.Index+1, n.lastIndex()+1)
+	}
+	n.snapshot = cloneSnapshot(snapshot)
+	n.log = suffix
 }
 
 func (n *Node) resetElectionTimer() {

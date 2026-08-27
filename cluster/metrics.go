@@ -23,6 +23,7 @@ type nodeMetrics struct {
 	commit            prometheus.Gauge
 	applied           prometheus.Gauge
 	logLength         prometheus.Gauge
+	snapshotIndex     prometheus.Gauge
 	replicationLag    *prometheus.GaugeVec
 	elections         prometheus.Counter
 	leadershipChanges prometheus.Counter
@@ -42,7 +43,8 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		leader:            prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_leader_id", Help: "Known leader node ID.", ConstLabels: constant}),
 		commit:            prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_commit_index", Help: "Highest committed log index.", ConstLabels: constant}),
 		applied:           prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_applied_index", Help: "Highest locally applied log index.", ConstLabels: constant}),
-		logLength:         prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_log_length", Help: "Last local log index.", ConstLabels: constant}),
+		logLength:         prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_log_length", Help: "Number of retained Raft log entries after compaction.", ConstLabels: constant}),
+		snapshotIndex:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_snapshot_index", Help: "Highest durable Raft snapshot index.", ConstLabels: constant}),
 		replicationLag:    prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "lsmdb_raft_replication_lag", Help: "Leader log entries not yet matched by a peer.", ConstLabels: constant}, []string{"peer_id"}),
 		elections:         prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_elections_total", Help: "Observed election attempts.", ConstLabels: constant}),
 		leadershipChanges: prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_leadership_changes_total", Help: "Observed transitions into leader.", ConstLabels: constant}),
@@ -53,7 +55,7 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		rpcDuration:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "lsmdb_grpc_request_duration_seconds", Help: "gRPC request latency.", ConstLabels: constant, Buckets: prometheus.DefBuckets}, []string{"method"}),
 	}
 	m.registry.MustRegister(
-		m.role, m.term, m.leader, m.commit, m.applied, m.logLength, m.replicationLag,
+		m.role, m.term, m.leader, m.commit, m.applied, m.logLength, m.snapshotIndex, m.replicationLag,
 		m.elections, m.leadershipChanges, m.quorumLoss, m.proposals,
 		m.transportFailures, m.rpcRequests, m.rpcDuration,
 	)
@@ -92,7 +94,8 @@ func (m *nodeMetrics) observeStatus(previous, current raft.Status, applied uint6
 	m.leader.Set(float64(current.LeaderID))
 	m.commit.Set(float64(current.CommitIndex))
 	m.applied.Set(float64(applied))
-	m.logLength.Set(float64(current.LastLogIndex))
+	m.logLength.Set(float64(current.RetainedLogEntries))
+	m.snapshotIndex.Set(float64(current.SnapshotIndex))
 	if current.Role == raft.Candidate && previous.Role != raft.Candidate {
 		m.elections.Inc()
 	}

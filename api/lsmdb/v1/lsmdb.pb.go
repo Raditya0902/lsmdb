@@ -443,16 +443,18 @@ func (x *Peer) GetAddress() string {
 }
 
 type StatusResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        uint64                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Role          string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
-	Term          uint64                 `protobuf:"varint,3,opt,name=term,proto3" json:"term,omitempty"`
-	LeaderId      uint64                 `protobuf:"varint,4,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
-	CommitIndex   uint64                 `protobuf:"varint,5,opt,name=commit_index,json=commitIndex,proto3" json:"commit_index,omitempty"`
-	AppliedIndex  uint64                 `protobuf:"varint,6,opt,name=applied_index,json=appliedIndex,proto3" json:"applied_index,omitempty"`
-	Peers         []*Peer                `protobuf:"bytes,7,rep,name=peers,proto3" json:"peers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	NodeId             uint64                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Role               string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	Term               uint64                 `protobuf:"varint,3,opt,name=term,proto3" json:"term,omitempty"`
+	LeaderId           uint64                 `protobuf:"varint,4,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	CommitIndex        uint64                 `protobuf:"varint,5,opt,name=commit_index,json=commitIndex,proto3" json:"commit_index,omitempty"`
+	AppliedIndex       uint64                 `protobuf:"varint,6,opt,name=applied_index,json=appliedIndex,proto3" json:"applied_index,omitempty"`
+	Peers              []*Peer                `protobuf:"bytes,7,rep,name=peers,proto3" json:"peers,omitempty"`
+	SnapshotIndex      uint64                 `protobuf:"varint,8,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	RetainedLogEntries uint64                 `protobuf:"varint,9,opt,name=retained_log_entries,json=retainedLogEntries,proto3" json:"retained_log_entries,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *StatusResponse) Reset() {
@@ -532,6 +534,20 @@ func (x *StatusResponse) GetPeers() []*Peer {
 		return x.Peers
 	}
 	return nil
+}
+
+func (x *StatusResponse) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *StatusResponse) GetRetainedLogEntries() uint64 {
+	if x != nil {
+		return x.RetainedLogEntries
+	}
+	return 0
 }
 
 // NotLeader is attached to FailedPrecondition gRPC statuses.
@@ -660,6 +676,9 @@ type RaftMessage struct {
 	Reject        bool                   `protobuf:"varint,9,opt,name=reject,proto3" json:"reject,omitempty"`
 	RejectHint    uint64                 `protobuf:"varint,10,opt,name=reject_hint,json=rejectHint,proto3" json:"reject_hint,omitempty"`
 	Context       uint64                 `protobuf:"varint,11,opt,name=context,proto3" json:"context,omitempty"`
+	SnapshotIndex uint64                 `protobuf:"varint,12,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	SnapshotTerm  uint64                 `protobuf:"varint,13,opt,name=snapshot_term,json=snapshotTerm,proto3" json:"snapshot_term,omitempty"`
+	SnapshotData  []byte                 `protobuf:"bytes,14,opt,name=snapshot_data,json=snapshotData,proto3" json:"snapshot_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -769,6 +788,27 @@ func (x *RaftMessage) GetContext() uint64 {
 		return x.Context
 	}
 	return 0
+}
+
+func (x *RaftMessage) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *RaftMessage) GetSnapshotTerm() uint64 {
+	if x != nil {
+		return x.SnapshotTerm
+	}
+	return 0
+}
+
+func (x *RaftMessage) GetSnapshotData() []byte {
+	if x != nil {
+		return x.SnapshotData
+	}
+	return nil
 }
 
 type RaftAck struct {
@@ -915,7 +955,7 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\rStatusRequest\"0\n" +
 	"\x04Peer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xdc\x01\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xb5\x02\n" +
 	"\x0eStatusResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x12\n" +
@@ -923,14 +963,16 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\tleader_id\x18\x04 \x01(\x04R\bleaderId\x12!\n" +
 	"\fcommit_index\x18\x05 \x01(\x04R\vcommitIndex\x12#\n" +
 	"\rapplied_index\x18\x06 \x01(\x04R\fappliedIndex\x12$\n" +
-	"\x05peers\x18\a \x03(\v2\x0e.lsmdb.v1.PeerR\x05peers\"O\n" +
+	"\x05peers\x18\a \x03(\v2\x0e.lsmdb.v1.PeerR\x05peers\x12%\n" +
+	"\x0esnapshot_index\x18\b \x01(\x04R\rsnapshotIndex\x120\n" +
+	"\x14retained_log_entries\x18\t \x01(\x04R\x12retainedLogEntries\"O\n" +
 	"\tNotLeader\x12\x1b\n" +
 	"\tleader_id\x18\x01 \x01(\x04R\bleaderId\x12%\n" +
 	"\x0eleader_address\x18\x02 \x01(\tR\rleaderAddress\"H\n" +
 	"\bLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\xb7\x02\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\xa8\x03\n" +
 	"\vRaftMessage\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\rR\x04type\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\x04R\x04from\x12\x0e\n" +
@@ -944,7 +986,10 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\vreject_hint\x18\n" +
 	" \x01(\x04R\n" +
 	"rejectHint\x12\x18\n" +
-	"\acontext\x18\v \x01(\x04R\acontext\"\t\n" +
+	"\acontext\x18\v \x01(\x04R\acontext\x12%\n" +
+	"\x0esnapshot_index\x18\f \x01(\x04R\rsnapshotIndex\x12#\n" +
+	"\rsnapshot_term\x18\r \x01(\x04R\fsnapshotTerm\x12#\n" +
+	"\rsnapshot_data\x18\x0e \x01(\fR\fsnapshotData\"\t\n" +
 	"\aRaftAck\"\xf4\x01\n" +
 	"\aCommand\x129\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x1b.lsmdb.v1.Command.OperationR\toperation\x12\x10\n" +
@@ -961,9 +1006,10 @@ const file_api_lsmdb_v1_lsmdb_proto_rawDesc = "" +
 	"\x03Put\x12\x14.lsmdb.v1.PutRequest\x1a\x17.lsmdb.v1.WriteResponse\x12:\n" +
 	"\x06Delete\x12\x17.lsmdb.v1.DeleteRequest\x1a\x17.lsmdb.v1.WriteResponse\x122\n" +
 	"\x03Get\x12\x14.lsmdb.v1.GetRequest\x1a\x15.lsmdb.v1.GetResponse\x12;\n" +
-	"\x06Status\x12\x17.lsmdb.v1.StatusRequest\x1a\x18.lsmdb.v1.StatusResponse28\n" +
+	"\x06Status\x12\x17.lsmdb.v1.StatusRequest\x1a\x18.lsmdb.v1.StatusResponse2u\n" +
 	"\x04Raft\x120\n" +
-	"\x04Send\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAckB\x1cZ\x1alsmdb/api/lsmdb/v1;lsmdbv1b\x06proto3"
+	"\x04Send\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAck\x12;\n" +
+	"\x0fInstallSnapshot\x12\x15.lsmdb.v1.RaftMessage\x1a\x11.lsmdb.v1.RaftAckB\x1cZ\x1alsmdb/api/lsmdb/v1;lsmdbv1b\x06proto3"
 
 var (
 	file_api_lsmdb_v1_lsmdb_proto_rawDescOnce sync.Once
@@ -1004,13 +1050,15 @@ var file_api_lsmdb_v1_lsmdb_proto_depIdxs = []int32{
 	4,  // 5: lsmdb.v1.KV.Get:input_type -> lsmdb.v1.GetRequest
 	6,  // 6: lsmdb.v1.KV.Status:input_type -> lsmdb.v1.StatusRequest
 	11, // 7: lsmdb.v1.Raft.Send:input_type -> lsmdb.v1.RaftMessage
-	3,  // 8: lsmdb.v1.KV.Put:output_type -> lsmdb.v1.WriteResponse
-	3,  // 9: lsmdb.v1.KV.Delete:output_type -> lsmdb.v1.WriteResponse
-	5,  // 10: lsmdb.v1.KV.Get:output_type -> lsmdb.v1.GetResponse
-	8,  // 11: lsmdb.v1.KV.Status:output_type -> lsmdb.v1.StatusResponse
-	12, // 12: lsmdb.v1.Raft.Send:output_type -> lsmdb.v1.RaftAck
-	8,  // [8:13] is the sub-list for method output_type
-	3,  // [3:8] is the sub-list for method input_type
+	11, // 8: lsmdb.v1.Raft.InstallSnapshot:input_type -> lsmdb.v1.RaftMessage
+	3,  // 9: lsmdb.v1.KV.Put:output_type -> lsmdb.v1.WriteResponse
+	3,  // 10: lsmdb.v1.KV.Delete:output_type -> lsmdb.v1.WriteResponse
+	5,  // 11: lsmdb.v1.KV.Get:output_type -> lsmdb.v1.GetResponse
+	8,  // 12: lsmdb.v1.KV.Status:output_type -> lsmdb.v1.StatusResponse
+	12, // 13: lsmdb.v1.Raft.Send:output_type -> lsmdb.v1.RaftAck
+	12, // 14: lsmdb.v1.Raft.InstallSnapshot:output_type -> lsmdb.v1.RaftAck
+	9,  // [9:15] is the sub-list for method output_type
+	3,  // [3:9] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name

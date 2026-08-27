@@ -28,17 +28,18 @@ import (
 
 // NodeConfig configures one member of a static cluster.
 type NodeConfig struct {
-	ID               uint64
-	ListenAddress    string
-	MetricsAddress   string
-	DataDir          string
-	Peers            map[uint64]string
-	TickInterval     time.Duration
-	ElectionTickMin  int
-	ElectionTickMax  int
-	HeartbeatTicks   int
-	CheckQuorumTicks int
-	DBOptions        *db.Options
+	ID                uint64
+	ListenAddress     string
+	MetricsAddress    string
+	DataDir           string
+	Peers             map[uint64]string
+	TickInterval      time.Duration
+	ElectionTickMin   int
+	ElectionTickMax   int
+	HeartbeatTicks    int
+	CheckQuorumTicks  int
+	SnapshotThreshold uint64
+	DBOptions         *db.Options
 }
 
 func (c *NodeConfig) defaults() {
@@ -56,6 +57,9 @@ func (c *NodeConfig) defaults() {
 	}
 	if c.CheckQuorumTicks <= 0 {
 		c.CheckQuorumTicks = c.ElectionTickMin
+	}
+	if c.SnapshotThreshold == 0 {
+		c.SnapshotThreshold = 1000
 	}
 }
 
@@ -103,6 +107,14 @@ func StartNode(config NodeConfig) (*Node, error) {
 		return nil, fmt.Errorf("open raft store: %w", err)
 	}
 	hard, entries := store.Load()
+	snapshot := store.LoadSnapshot()
+	if snapshot.Index > machine.AppliedIndex() {
+		if err := machine.Restore(snapshot.Index, snapshot.Data); err != nil {
+			_ = store.Close()
+			_ = machine.Close()
+			return nil, fmt.Errorf("restore state snapshot: %w", err)
+		}
+	}
 	peerIDs := make([]uint64, 0, len(config.Peers))
 	for id := range config.Peers {
 		peerIDs = append(peerIDs, id)
@@ -113,7 +125,7 @@ func StartNode(config NodeConfig) (*Node, error) {
 		ElectionTickMax: config.ElectionTickMax, HeartbeatTicks: config.HeartbeatTicks,
 		CheckQuorumTicks: config.CheckQuorumTicks, RandomSeed: config.ID,
 		AppliedIndex: machine.AppliedIndex(),
-	}, hard, entries)
+	}, hard, entries, snapshot)
 	if err != nil {
 		_ = store.Close()
 		_ = machine.Close()
@@ -129,7 +141,7 @@ func StartNode(config NodeConfig) (*Node, error) {
 	metrics := newNodeMetrics(config.ID)
 	observed := &observedTransport{inner: transport, metrics: metrics}
 	runtime, err := raftnode.Start(
-		raftnode.Config{TickInterval: config.TickInterval}, core, store, observed, machine,
+		raftnode.Config{TickInterval: config.TickInterval, SnapshotThreshold: config.SnapshotThreshold}, core, store, observed, machine,
 	)
 	if err != nil {
 		_ = listener.Close()
@@ -143,8 +155,8 @@ func StartNode(config NodeConfig) (*Node, error) {
 		metrics: metrics,
 		server: grpc.NewServer(
 			grpc.UnaryInterceptor(metrics.unaryInterceptor),
-			grpc.MaxRecvMsgSize(kvstate.MaxValueBytes+64*1024),
-			grpc.MaxSendMsgSize(kvstate.MaxValueBytes+64*1024),
+			grpc.MaxRecvMsgSize(260<<20),
+			grpc.MaxSendMsgSize(260<<20),
 		),
 		listener: listener,
 	}
@@ -288,16 +300,28 @@ func (h *handler) Status(ctx context.Context, _ *lsmdbv1.StatusRequest) (*lsmdbv
 		NodeId: current.ID, Role: current.Role.String(), Term: current.Term,
 		LeaderId: current.LeaderID, CommitIndex: current.CommitIndex,
 		AppliedIndex: h.node.machine.AppliedIndex(), Peers: peers,
+		SnapshotIndex: current.SnapshotIndex, RetainedLogEntries: current.RetainedLogEntries,
 	}, nil
 }
 
 func (h *handler) Send(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmdbv1.RaftAck, error) {
+	return h.handleRaftMessage(ctx, request, false)
+}
+
+func (h *handler) InstallSnapshot(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmdbv1.RaftAck, error) {
+	return h.handleRaftMessage(ctx, request, true)
+}
+
+func (h *handler) handleRaftMessage(ctx context.Context, request *lsmdbv1.RaftMessage, requireSnapshot bool) (*lsmdbv1.RaftAck, error) {
 	message, err := raftgrpc.FromProto(request)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if message.To != h.node.config.ID {
 		return nil, status.Errorf(codes.InvalidArgument, "message addressed to node %d", message.To)
+	}
+	if requireSnapshot && message.Type != raft.MsgSnapshot {
+		return nil, status.Error(codes.InvalidArgument, "InstallSnapshot requires a snapshot message")
 	}
 	if err := h.node.runtime.Step(ctx, message); err != nil {
 		return nil, h.node.rpcError(err)

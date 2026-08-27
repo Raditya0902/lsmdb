@@ -176,3 +176,47 @@ func TestStaleLeaderCannotOverwriteNewerLog(t *testing.T) {
 		t.Fatal("stale leader changed the log")
 	}
 }
+
+func TestFollowerInstallsSnapshotThenContinuesAppending(t *testing.T) {
+	node, err := New(testConfig(2), HardState{Term: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := node.Step(Message{Type: MsgSnapshot, From: 1, To: 2, Term: 4, Snapshot: &Snapshot{Index: 3, Term: 2, Data: []byte("image")}})
+	if update.Snapshot == nil || update.Snapshot.Index != 3 {
+		t.Fatalf("snapshot update = %#v", update.Snapshot)
+	}
+	if len(update.Messages) != 1 || update.Messages[0].Type != MsgSnapshotResponse || update.Messages[0].Reject {
+		t.Fatalf("snapshot response = %#v", update.Messages)
+	}
+	update = node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 4, LogIndex: 3, LogTerm: 2, Entries: []Entry{{Index: 4, Term: 4, Data: []byte("next")}}, LeaderCommit: 4})
+	if len(update.Committed) != 1 || update.Committed[0].Index != 4 {
+		t.Fatalf("post-snapshot committed = %#v", update.Committed)
+	}
+	status := node.Status()
+	if status.SnapshotIndex != 3 || status.LastLogIndex != 4 || status.RetainedLogEntries != 1 {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestLeaderSendsSnapshotToFollowerBehindCompactedPrefix(t *testing.T) {
+	cfg := testConfig(1)
+	cfg.AppliedIndex = 3
+	node, err := New(cfg, HardState{Term: 1}, nil, Snapshot{Index: 3, Term: 1, Data: []byte("image")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var update Update
+	for i := 0; i < 20 && node.Status().Role != PreCandidate; i++ {
+		update = node.Tick()
+	}
+	update = node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: 2})
+	update = node.Step(Message{Type: MsgVoteResponse, From: 2, To: 1, Term: 2})
+	if node.Status().Role != Leader {
+		t.Fatalf("role = %s", node.Status().Role)
+	}
+	update = node.Step(Message{Type: MsgAppendResponse, From: 3, To: 1, Term: 2, Reject: true, RejectHint: 1})
+	if len(update.Messages) != 1 || update.Messages[0].Type != MsgSnapshot || update.Messages[0].Snapshot == nil {
+		t.Fatalf("catch-up message = %#v", update.Messages)
+	}
+}

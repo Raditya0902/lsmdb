@@ -248,6 +248,112 @@ func (db *DB) DurableIndex() uint64 {
 	return db.durableIndex
 }
 
+// ExportReplicaState returns a consistent logical image of all live records.
+// Internal state-machine keys are intentionally included.
+func (db *DB) ExportReplicaState() ([]KVPair, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.opts.DurabilityMode != DurabilityReplica {
+		return nil, errors.New("replica state export requires replica durability mode")
+	}
+	all := append([]memtable.Record(nil), db.mem.SortedEntries()...)
+	for _, reader := range db.readers {
+		records, err := reader.LoadAll()
+		if err != nil {
+			return nil, fmt.Errorf("load snapshot records: %w", err)
+		}
+		all = append(all, records...)
+	}
+	byKey := make(map[string]memtable.Record, len(all))
+	for _, record := range all {
+		if current, ok := byKey[record.Key]; !ok || record.SeqNum > current.SeqNum {
+			byKey[record.Key] = record
+		}
+	}
+	pairs := make([]KVPair, 0, len(byKey))
+	for key, record := range byKey {
+		if record.Type == memtable.RecordTypePut {
+			pairs = append(pairs, KVPair{Key: key, Value: append([]byte(nil), record.Value...)})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Key < pairs[j].Key })
+	return pairs, nil
+}
+
+// ReplaceReplicaState atomically publishes a snapshot as the complete LSM state.
+func (db *DB) ReplaceReplicaState(index uint64, pairs []KVPair) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.opts.DurabilityMode != DurabilityReplica {
+		return errors.New("replica state replacement requires replica durability mode")
+	}
+	if index == 0 {
+		return errors.New("snapshot index must be positive")
+	}
+	if index < db.appliedIndex {
+		return fmt.Errorf("snapshot index %d is older than applied index %d", index, db.appliedIndex)
+	}
+	records := make([]memtable.Record, len(pairs))
+	for i, pair := range pairs {
+		if pair.Key == "" || (i > 0 && pairs[i-1].Key >= pair.Key) {
+			return errors.New("snapshot keys must be non-empty and strictly sorted")
+		}
+		records[i] = memtable.Record{Key: pair.Key, Value: append([]byte(nil), pair.Value...), SeqNum: index, Type: memtable.RecordTypePut}
+	}
+
+	nextSST := db.nextSST + 1
+	var newReaders []*sstable.Reader
+	var newNames []string
+	var newPath string
+	if len(records) > 0 {
+		name := fmt.Sprintf("%06d.sst", nextSST)
+		newPath = filepath.Join(db.path, name)
+		if err := sstable.Write(newPath, records); err != nil {
+			return fmt.Errorf("write snapshot sstable: %w", err)
+		}
+		reader, err := sstable.Open(newPath)
+		if err != nil {
+			_ = os.Remove(newPath)
+			return fmt.Errorf("open snapshot sstable: %w", err)
+		}
+		newReaders = []*sstable.Reader{reader}
+		newNames = []string{name}
+	}
+	state := db.manifest
+	state.SSTables = newNames
+	state.NextSST = nextSST
+	state.AppliedIndex = index
+	if err := manifest.Store(db.path, state); err != nil {
+		for _, reader := range newReaders {
+			_ = reader.Close()
+		}
+		if newPath != "" {
+			_ = os.Remove(newPath)
+		}
+		return fmt.Errorf("publish snapshot manifest: %w", err)
+	}
+	oldReaders := db.readers
+	oldPaths := make([]string, 0, len(oldReaders))
+	for _, reader := range oldReaders {
+		oldPaths = append(oldPaths, reader.Path())
+	}
+	db.readers = newReaders
+	db.mem = memtable.NewWithSeq(index + 1)
+	db.nextSST = nextSST
+	db.manifest = state
+	db.appliedIndex = index
+	db.durableIndex = index
+	for _, reader := range oldReaders {
+		_ = reader.Close()
+	}
+	for _, path := range oldPaths {
+		if path != newPath {
+			_ = os.Remove(path)
+		}
+	}
+	return nil
+}
+
 // Scan returns all live key-value pairs where from <= key <= to, sorted ascending.
 // Tombstoned keys are excluded. Results merge the MemTable with all SSTables;
 // the highest sequence number wins per key.

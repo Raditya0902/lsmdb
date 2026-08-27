@@ -8,10 +8,9 @@ filters and a sparse index, and size-tiered compaction merges the complete file
 set. The public interface is `db.Open`, `Set`, `Get`, `Delete`, `Scan`, and
 `Close`.
 
-The current WAL syncs on close rather than every append. SSTables are synced, but
-there is no implemented manifest and compaction deletes old files after opening
-the replacement. Those rules are sufficient for the original demonstration but
-not for replicated-state-machine recovery.
+The embedded WAL syncs on close rather than every append. SSTables and the
+manifest are synchronously published, and obsolete files are deleted only after
+the replacement generation becomes durable.
 
 Baseline on 2026-08-26:
 
@@ -60,16 +59,20 @@ sequence as one externally indexed batch, making retries deterministic.
 - Uncommitted entries never reach the LSM state machine.
 - Recovery loads durable Raft state and replays committed entries newer than the
   LSM applied watermark.
+- A durable logical snapshot contains user data and client-session metadata at a
+  committed index. Recovery restores it before replaying the retained log suffix.
+- Snapshot publication precedes prefix deletion, so a crash may retain redundant
+  log bytes but cannot lose the only durable copy of state.
 
 ## First-Release Limits
 
 The MVP uses fixed three-node membership, plaintext local networking, single-key
 operations, and leader-served point reads. It does not include transactions,
-distributed scans, authentication, rolling upgrades, snapshots, Raft log
-compaction, or dynamic membership.
+distributed scans, authentication, rolling upgrades, or dynamic membership.
+Snapshot transfer is bounded to 256 MiB per image in this release.
 
 ## Deferred Evolution
 
-After the MVP is correct and benchmarked: snapshots and `InstallSnapshot`, Raft
-log compaction, a five-node profile, joint-consensus membership, optional stale
-follower reads, sharding/multi-Raft, TLS, and production operations.
+Next: chunked snapshot streaming, a five-node profile, joint-consensus
+membership, optional stale follower reads, sharding/multi-Raft, TLS, and
+production operations.

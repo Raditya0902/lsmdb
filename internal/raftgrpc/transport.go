@@ -34,7 +34,11 @@ func (t *Transport) Send(ctx context.Context, message raft.Message) error {
 	if err != nil {
 		return err
 	}
-	_, err = client.Send(ctx, ToProto(message))
+	if message.Type == raft.MsgSnapshot {
+		_, err = client.InstallSnapshot(ctx, ToProto(message))
+	} else {
+		_, err = client.Send(ctx, ToProto(message))
+	}
 	return err
 }
 
@@ -77,16 +81,22 @@ func ToProto(message raft.Message) *lsmdbv1.RaftMessage {
 	for _, entry := range message.Entries {
 		entries = append(entries, &lsmdbv1.LogEntry{Index: entry.Index, Term: entry.Term, Data: entry.Data})
 	}
-	return &lsmdbv1.RaftMessage{
+	result := &lsmdbv1.RaftMessage{
 		Type: uint32(message.Type), From: message.From, To: message.To, Term: message.Term,
 		LogIndex: message.LogIndex, LogTerm: message.LogTerm, Entries: entries,
 		LeaderCommit: message.LeaderCommit, Reject: message.Reject,
 		RejectHint: message.RejectHint, Context: message.Context,
 	}
+	if message.Snapshot != nil {
+		result.SnapshotIndex = message.Snapshot.Index
+		result.SnapshotTerm = message.Snapshot.Term
+		result.SnapshotData = append([]byte(nil), message.Snapshot.Data...)
+	}
+	return result
 }
 
 func FromProto(message *lsmdbv1.RaftMessage) (raft.Message, error) {
-	if message == nil || message.Type > uint32(raft.MsgAppendResponse) {
+	if message == nil || message.Type > uint32(raft.MsgSnapshotResponse) {
 		return raft.Message{}, fmt.Errorf("invalid raft message type")
 	}
 	entries := make([]raft.Entry, 0, len(message.Entries))
@@ -96,10 +106,14 @@ func FromProto(message *lsmdbv1.RaftMessage) (raft.Message, error) {
 		}
 		entries = append(entries, raft.Entry{Index: entry.Index, Term: entry.Term, Data: append([]byte(nil), entry.Data...)})
 	}
-	return raft.Message{
+	result := raft.Message{
 		Type: raft.MessageType(message.Type), From: message.From, To: message.To, Term: message.Term,
 		LogIndex: message.LogIndex, LogTerm: message.LogTerm, Entries: entries,
 		LeaderCommit: message.LeaderCommit, Reject: message.Reject,
 		RejectHint: message.RejectHint, Context: message.Context,
-	}, nil
+	}
+	if message.SnapshotIndex != 0 || message.SnapshotTerm != 0 || len(message.SnapshotData) != 0 {
+		result.Snapshot = &raft.Snapshot{Index: message.SnapshotIndex, Term: message.SnapshotTerm, Data: append([]byte(nil), message.SnapshotData...)}
+	}
+	return result, nil
 }

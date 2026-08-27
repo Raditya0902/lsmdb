@@ -70,3 +70,40 @@ func TestMachineRecoversSessionMetadata(t *testing.T) {
 		t.Fatalf("Get after restart = (%q, %v, %v)", value, ok, err)
 	}
 }
+
+func TestMachineSnapshotRestorePreservesDataAndDeduplication(t *testing.T) {
+	source, err := Open(t.TempDir(), &db.Options{FlushThreshold: 100, CompactionThreshold: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if err := source.Apply(1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Apply(2, command(t, lsmdbv1.Command_OPERATION_PUT, "new", 2)); err != nil {
+		t.Fatal(err)
+	}
+	index, data, err := source.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	if err := target.Restore(index, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Apply(3, command(t, lsmdbv1.Command_OPERATION_PUT, "old", 1)); err != nil {
+		t.Fatal(err)
+	}
+	value, found, err := target.Get([]byte("key"))
+	if err != nil || !found || string(value) != "new" {
+		t.Fatalf("restored Get = (%q,%v,%v)", value, found, err)
+	}
+	if target.AppliedIndex() != 3 {
+		t.Fatalf("applied index = %d", target.AppliedIndex())
+	}
+}

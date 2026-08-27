@@ -41,6 +41,8 @@ const (
 	MsgVoteResponse
 	MsgAppend
 	MsgAppendResponse
+	MsgSnapshot
+	MsgSnapshotResponse
 )
 
 // Entry is one replicated log entry. Indexes begin at one and are contiguous.
@@ -56,6 +58,14 @@ type HardState struct {
 	VotedFor uint64
 }
 
+// Snapshot is a durable state-machine image at one committed log position.
+// Data is opaque to the consensus core.
+type Snapshot struct {
+	Index uint64
+	Term  uint64
+	Data  []byte
+}
+
 // Message contains fields shared by vote and append RPCs.
 type Message struct {
 	Type         MessageType
@@ -69,6 +79,7 @@ type Message struct {
 	Reject       bool
 	RejectHint   uint64
 	Context      uint64
+	Snapshot     *Snapshot
 }
 
 // Update describes effects produced by one deterministic state transition.
@@ -80,6 +91,7 @@ type Update struct {
 	Messages     []Message
 	Committed    []Entry
 	RoleChanged  bool
+	Snapshot     *Snapshot
 }
 
 func (u *Update) merge(other Update) {
@@ -94,6 +106,10 @@ func (u *Update) merge(other Update) {
 	u.Messages = append(u.Messages, other.Messages...)
 	u.Committed = append(u.Committed, other.Committed...)
 	u.RoleChanged = u.RoleChanged || other.RoleChanged
+	if other.Snapshot != nil {
+		copy := cloneSnapshot(*other.Snapshot)
+		u.Snapshot = &copy
+	}
 }
 
 // Config controls logical tick timing. Peers must contain ID.
@@ -145,14 +161,16 @@ func (c Config) validate() error {
 
 // Status is a read-only snapshot of consensus progress.
 type Status struct {
-	ID           uint64
-	Role         Role
-	Term         uint64
-	LeaderID     uint64
-	CommitIndex  uint64
-	LastLogIndex uint64
-	VotedFor     uint64
-	MatchIndex   map[uint64]uint64
+	ID                 uint64
+	Role               Role
+	Term               uint64
+	LeaderID           uint64
+	CommitIndex        uint64
+	LastLogIndex       uint64
+	SnapshotIndex      uint64
+	RetainedLogEntries uint64
+	VotedFor           uint64
+	MatchIndex         map[uint64]uint64
 }
 
 var (
@@ -163,3 +181,8 @@ var (
 	// ErrReadNotReady means the leader has not committed an entry in its current term.
 	ErrReadNotReady = errors.New("raft leader is not ready for linearizable reads")
 )
+
+func cloneSnapshot(snapshot Snapshot) Snapshot {
+	snapshot.Data = append([]byte(nil), snapshot.Data...)
+	return snapshot
+}

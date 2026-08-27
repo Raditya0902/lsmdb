@@ -27,6 +27,8 @@ type Transport interface {
 type StateMachine interface {
 	Apply(index uint64, command []byte) error
 	AppliedIndex() uint64
+	Snapshot() (index uint64, data []byte, err error)
+	Restore(index uint64, data []byte) error
 	Close() error
 }
 
@@ -34,6 +36,8 @@ type StateMachine interface {
 type Config struct {
 	TickInterval time.Duration
 	QueueSize    int
+	// SnapshotThreshold compacts after this many applied entries. Zero disables it.
+	SnapshotThreshold uint64
 }
 
 type proposalResult struct {
@@ -68,14 +72,15 @@ type pendingRead struct {
 
 // Runtime serializes all access to a Raft Node in one event loop.
 type Runtime struct {
-	node      *raft.Node
-	store     StableStore
-	transport Transport
-	machine   StateMachine
-	events    chan any
-	outgoing  chan raft.Message
-	done      chan struct{}
-	once      sync.Once
+	node              *raft.Node
+	store             StableStore
+	transport         Transport
+	machine           StateMachine
+	events            chan any
+	outgoing          chan raft.Message
+	done              chan struct{}
+	snapshotThreshold uint64
+	once              sync.Once
 }
 
 // Start begins a runtime. The supplied node must have been restored using the
@@ -93,7 +98,8 @@ func Start(cfg Config, node *raft.Node, store StableStore, transport Transport, 
 	runtime := &Runtime{
 		node: node, store: store, transport: transport, machine: machine,
 		events: make(chan any, cfg.QueueSize), outgoing: make(chan raft.Message, cfg.QueueSize),
-		done: make(chan struct{}),
+		done:              make(chan struct{}),
+		snapshotThreshold: cfg.SnapshotThreshold,
 	}
 	go runtime.sendLoop()
 	go runtime.run(cfg.TickInterval)
@@ -269,6 +275,11 @@ func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingPr
 	if err := r.store.Persist(update); err != nil {
 		return fmt.Errorf("persist raft update: %w", err)
 	}
+	if update.Snapshot != nil && r.machine.AppliedIndex() < update.Snapshot.Index {
+		if err := r.machine.Restore(update.Snapshot.Index, update.Snapshot.Data); err != nil {
+			return fmt.Errorf("restore state snapshot %d: %w", update.Snapshot.Index, err)
+		}
+	}
 	for _, message := range update.Messages {
 		select {
 		case r.outgoing <- message:
@@ -293,6 +304,22 @@ func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingPr
 		if waiter, ok := pending[entry.Index]; ok {
 			waiter.result <- proposalResult{index: entry.Index}
 			delete(pending, entry.Index)
+		}
+	}
+	if r.snapshotThreshold > 0 {
+		status := r.node.Status()
+		if applied := r.machine.AppliedIndex(); applied > status.SnapshotIndex && applied-status.SnapshotIndex >= r.snapshotThreshold {
+			index, data, err := r.machine.Snapshot()
+			if err != nil {
+				return fmt.Errorf("create state snapshot: %w", err)
+			}
+			snapshotUpdate, err := r.node.CreateSnapshot(index, data)
+			if err != nil {
+				return fmt.Errorf("compact raft log: %w", err)
+			}
+			if err := r.store.Persist(snapshotUpdate); err != nil {
+				return fmt.Errorf("persist raft snapshot: %w", err)
+			}
 		}
 	}
 	if update.RoleChanged && r.node.Status().Role != raft.Leader {

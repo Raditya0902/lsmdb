@@ -326,6 +326,23 @@ and log effects, sends resulting messages, and applies committed entries in orde
 The production adapters are gRPC and a disk-backed stable store; tests also use a
 faultable in-memory transport.
 
+### Snapshots and Raft log compaction
+
+After a configurable number of applied entries, the state-machine adapter
+serializes the live user keys and client-session records at the applied index.
+The Raft core binds that image to the term at the same committed index. The stable
+store publishes a CRC-protected `SNAPSHOT` file with file and directory sync,
+then atomically rewrites `raft.log` with only entries after the snapshot index.
+Publishing in this order makes an interrupted compaction retain harmless prefix
+bytes instead of losing required state.
+
+The consensus log uses the snapshot index/term as its virtual first entry. If a
+follower rejects replication below that boundary, the leader sends the snapshot;
+the follower persists it, atomically replaces its LSM generation, acknowledges
+installation, and resumes normal append replication at the next index. Startup
+restores a durable snapshot newer than the LSM manifest watermark before opening
+the consensus core.
+
 ### Election and partition behavior
 
 - Randomized election timeouts begin with pre-vote, which does not increment term.
@@ -363,6 +380,7 @@ linearizable read.
 - **No distributed range scans.** Embedded range scans exist, but the network
   interface intentionally exposes only point operations in the MVP.
 - **No compression.** All bytes are stored verbatim.
-- **No snapshots or Raft log compaction.** The replicated log grows until these are added.
+- **Bounded snapshot transfer.** Snapshot images are sent as one gRPC message and
+  are capped at 256 MiB; chunked streaming is not yet implemented.
 - **Static membership and plaintext transport.** Dynamic membership, TLS, authentication,
   and rolling upgrades are deferred.

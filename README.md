@@ -50,7 +50,8 @@ The repository also includes a statically configured three-node database that
 uses the LSM engine as a replicated state machine. It implements Raft pre-vote,
 leader election, heartbeats, quorum replication, conflict repair, quorum-loss
 stepdown, persistent hard state/log recovery, retry deduplication, and
-ReadIndex-style linearizable point reads.
+ReadIndex-style linearizable point reads. Durable logical snapshots bound the
+retained Raft log and recover followers that fall behind the compacted prefix.
 
 ```text
 Client → gRPC leader → durable Raft majority → committed log index
@@ -85,6 +86,10 @@ The network interface supports `Put`, `Delete`, linearizable `Get`, and
 `Status`. Followers return a typed leader hint; the Go client automatically
 retries with the same client ID/request sequence, preventing a delayed retry
 from reapplying an older write after failover.
+
+Nodes snapshot every 1,000 applied entries by default. Override this for local
+testing with `lsmdb-node -snapshot-threshold=N`. `Status` and Prometheus expose
+the snapshot index and retained log-entry count.
 
 ### Cluster benchmark
 
@@ -221,7 +226,7 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
 - **No fsync per WAL append.** Only `Close()` fsyncs the WAL. Writes between the last flush and a power failure can be lost.
 - **Static cluster membership.** The distributed MVP requires the same fixed peer map on every node; joint-consensus membership changes are deferred.
-- **No Raft snapshots/log compaction.** Replica logs currently grow without bound. LSM applied watermarks make restart replay incremental, but do not replace snapshot installation.
+- **Bounded snapshot transfer.** Snapshot installation currently uses one gRPC message and rejects images larger than 256 MiB; chunked streaming is deferred.
 - **Point operations only over gRPC.** Distributed scans, transactions, and follower-stale reads are not exposed.
 - **Development security model.** The demo cluster uses plaintext gRPC with no authentication or rolling-upgrade protocol.
 
@@ -231,7 +236,6 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 
 - Leveled compaction (L0→L1→L2) to bound read amplification without growing a single large SSTable
 - Block compression (snappy or zstd) for the SSTable data section
-- Manifest file for atomic SSTable replacement and crash-safe compaction
 - Concurrent readers with a read-lock-free SSTable list snapshot
 
 ---

@@ -25,6 +25,28 @@ type Reader struct {
 	bloomSkips  int64 // incremented atomically each time bloom filter rejects a key
 }
 
+// Iterator reads one data record at a time in SSTable key order.
+type Iterator struct {
+	reader *Reader
+	pos    int64
+}
+
+// Iterator returns a new record iterator positioned at the data-section start.
+func (r *Reader) Iterator() *Iterator { return &Iterator{reader: r} }
+
+// Next returns the next record. ok is false at the end of the data section.
+func (it *Iterator) Next() (record memtable.Record, ok bool, err error) {
+	if it.pos >= it.reader.metaOffset {
+		return memtable.Record{}, false, nil
+	}
+	record, size, err := it.reader.readRecordAt(it.pos)
+	if err != nil {
+		return memtable.Record{}, false, err
+	}
+	it.pos += size
+	return record, true, nil
+}
+
 // Open loads an SSTable's footer, bloom filter, metadata, and sparse index into memory.
 // The caller must call Close when done.
 func Open(path string) (*Reader, error) {

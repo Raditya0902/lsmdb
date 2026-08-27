@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"sync"
 	"time"
 
@@ -175,4 +177,25 @@ func (a *Adapter) Send(ctx context.Context, message raft.Message) error {
 		return fmt.Errorf("adapter %d cannot send as node %d", a.id, message.From)
 	}
 	return a.network.deliver(ctx, message)
+}
+
+// SendSnapshot materializes bytes only in this deterministic in-memory adapter.
+func (a *Adapter) SendSnapshot(ctx context.Context, message raft.Message, reader io.Reader, size uint64, checksum uint32) error {
+	if size > uint64(^uint(0)>>1) {
+		return errors.New("snapshot exceeds in-memory adapter limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, int64(size)+1))
+	if err != nil {
+		return err
+	}
+	if uint64(len(data)) != size || crc32.ChecksumIEEE(data) != checksum {
+		return errors.New("snapshot source size or checksum mismatch")
+	}
+	if message.Snapshot == nil {
+		return errors.New("snapshot message has no metadata")
+	}
+	copy := *message.Snapshot
+	copy.Data = data
+	message.Snapshot = &copy
+	return a.Send(ctx, message)
 }

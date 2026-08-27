@@ -14,8 +14,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var snapshotMagic = [8]byte{'L', 'S', 'M', 'S', 'N', 'A', 'P', 1}
-
 const (
 	userPrefix    = "\x01"
 	sessionPrefix = "\x00session/"
@@ -105,73 +103,29 @@ func (m *Machine) Get(key []byte) ([]byte, bool, error) {
 	return value, ok, nil
 }
 
-// Snapshot serializes all user and client-session state at the applied index.
+// WriteSnapshot streams all user and client-session state at the applied index.
+func (m *Machine) WriteSnapshot(writer io.Writer) (uint64, error) {
+	return m.db.WriteReplicaSnapshot(writer)
+}
+
+// Snapshot returns a byte-backed image for compatibility and small tests.
 func (m *Machine) Snapshot() (uint64, []byte, error) {
-	index := m.db.AppliedIndex()
-	if index == 0 {
-		return 0, nil, errors.New("cannot snapshot an unapplied state machine")
-	}
-	pairs, err := m.db.ExportReplicaState()
+	var out bytes.Buffer
+	index, err := m.WriteSnapshot(&out)
 	if err != nil {
 		return 0, nil, err
-	}
-	var out bytes.Buffer
-	out.Write(snapshotMagic[:])
-	if err := binary.Write(&out, binary.BigEndian, uint64(len(pairs))); err != nil {
-		return 0, nil, err
-	}
-	for _, pair := range pairs {
-		if uint64(len(pair.Key)) > uint64(^uint32(0)) || uint64(len(pair.Value)) > uint64(^uint32(0)) {
-			return 0, nil, errors.New("snapshot record is too large")
-		}
-		_ = binary.Write(&out, binary.BigEndian, uint32(len(pair.Key)))
-		_ = binary.Write(&out, binary.BigEndian, uint32(len(pair.Value)))
-		out.WriteString(pair.Key)
-		out.Write(pair.Value)
 	}
 	return index, out.Bytes(), nil
 }
 
-// Restore atomically replaces the local LSM image with a received snapshot.
+// RestoreSnapshot atomically replaces the local LSM image from a stream.
+func (m *Machine) RestoreSnapshot(index uint64, size uint64, reader io.Reader) error {
+	return m.db.ReplaceReplicaSnapshot(index, size, reader)
+}
+
+// Restore accepts a byte-backed image for compatibility and small tests.
 func (m *Machine) Restore(index uint64, data []byte) error {
-	reader := bytes.NewReader(data)
-	var magic [8]byte
-	if _, err := io.ReadFull(reader, magic[:]); err != nil || magic != snapshotMagic {
-		return errors.New("invalid state snapshot magic")
-	}
-	var count uint64
-	if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
-		return fmt.Errorf("decode snapshot count: %w", err)
-	}
-	if count > uint64(len(data))/8 {
-		return errors.New("invalid state snapshot record count")
-	}
-	pairs := make([]db.KVPair, 0, count)
-	for i := uint64(0); i < count; i++ {
-		var keyLen, valueLen uint32
-		if err := binary.Read(reader, binary.BigEndian, &keyLen); err != nil {
-			return fmt.Errorf("decode snapshot key length: %w", err)
-		}
-		if err := binary.Read(reader, binary.BigEndian, &valueLen); err != nil {
-			return fmt.Errorf("decode snapshot value length: %w", err)
-		}
-		if uint64(keyLen)+uint64(valueLen) > uint64(reader.Len()) {
-			return errors.New("truncated state snapshot record")
-		}
-		key := make([]byte, keyLen)
-		value := make([]byte, valueLen)
-		if _, err := io.ReadFull(reader, key); err != nil {
-			return err
-		}
-		if _, err := io.ReadFull(reader, value); err != nil {
-			return err
-		}
-		pairs = append(pairs, db.KVPair{Key: string(key), Value: value})
-	}
-	if reader.Len() != 0 {
-		return errors.New("state snapshot has trailing data")
-	}
-	return m.db.ReplaceReplicaState(index, pairs)
+	return m.RestoreSnapshot(index, uint64(len(data)), bytes.NewReader(data))
 }
 
 func (m *Machine) AppliedIndex() uint64 { return m.db.AppliedIndex() }

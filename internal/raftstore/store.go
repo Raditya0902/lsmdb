@@ -2,6 +2,7 @@
 package raftstore
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -21,19 +22,21 @@ const (
 	logFile         = "raft.log"
 	entryHeader     = 8 + 8 + 4
 	maxEntryData    = 4 << 20
-	maxSnapshotData = 256 << 20
+	maxSnapshotData = uint64(64 << 30)
 	snapshotHeader  = 8 + 8 + 8
 )
 
 // Store is a synchronized disk-backed Raft stable store.
 type Store struct {
-	mu       sync.Mutex
-	dir      string
-	logFile  *os.File
-	entries  []raft.Entry
-	offsets  []int64
-	hard     raft.HardState
-	snapshot raft.Snapshot
+	mu               sync.Mutex
+	dir              string
+	logFile          *os.File
+	entries          []raft.Entry
+	offsets          []int64
+	hard             raft.HardState
+	snapshot         raft.Snapshot
+	snapshotSize     uint64
+	snapshotChecksum uint32
 }
 
 // Open creates or recovers a stable store. A partial or corrupt trailing log
@@ -46,7 +49,7 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := loadSnapshot(dir)
+	snapshot, snapshotSize, snapshotChecksum, err := inspectSnapshot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -67,14 +70,67 @@ func Open(dir string) (*Store, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("seek raft log: %w", err)
 	}
-	return &Store{dir: dir, logFile: f, entries: entries, offsets: offsets, hard: hard, snapshot: snapshot}, nil
+	return &Store{dir: dir, logFile: f, entries: entries, offsets: offsets, hard: hard, snapshot: snapshot, snapshotSize: snapshotSize, snapshotChecksum: snapshotChecksum}, nil
 }
 
-// LoadSnapshot returns a defensive copy of the durable snapshot.
-func (s *Store) LoadSnapshot() raft.Snapshot {
+// SnapshotMetadata returns the durable snapshot without materializing its data.
+func (s *Store) SnapshotMetadata() raft.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneSnapshot(s.snapshot)
+}
+
+// LoadSnapshot returns a byte-backed copy for compatibility and small tests.
+func (s *Store) LoadSnapshot() raft.Snapshot {
+	metadata := s.SnapshotMetadata()
+	if metadata.Index == 0 {
+		return metadata
+	}
+	reader, _, _, err := s.OpenSnapshot(metadata.Index)
+	if err != nil {
+		return raft.Snapshot{}
+	}
+	defer reader.Close()
+	metadata.Data, err = io.ReadAll(reader)
+	if err != nil {
+		return raft.Snapshot{}
+	}
+	return metadata
+}
+
+type sectionReadCloser struct {
+	*io.SectionReader
+	closer io.Closer
+}
+
+func (r *sectionReadCloser) Close() error { return r.closer.Close() }
+
+type boundedSnapshotWriter struct {
+	writer  io.Writer
+	written uint64
+}
+
+func (w *boundedSnapshotWriter) Write(data []byte) (int, error) {
+	if uint64(len(data)) > maxSnapshotData-w.written {
+		return 0, fmt.Errorf("snapshot exceeds %d bytes", maxSnapshotData)
+	}
+	n, err := w.writer.Write(data)
+	w.written += uint64(n)
+	return n, err
+}
+
+// OpenSnapshot opens the durable state-machine bytes for one snapshot.
+func (s *Store) OpenSnapshot(index uint64) (io.ReadCloser, uint64, uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index == 0 || index != s.snapshot.Index {
+		return nil, 0, 0, fmt.Errorf("raft snapshot %d is not durable", index)
+	}
+	f, err := os.Open(filepath.Join(s.dir, snapshotFile))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("open raft snapshot: %w", err)
+	}
+	return &sectionReadCloser{SectionReader: io.NewSectionReader(f, snapshotHeader, int64(s.snapshotSize)), closer: f}, s.snapshotSize, s.snapshotChecksum, nil
 }
 
 // Load returns defensive copies of the durable state.
@@ -91,6 +147,18 @@ func (s *Store) Load() (raft.HardState, []raft.Entry) {
 // Persist durably applies the persistence effects in update. Hard state and the
 // modified log reach disk before this method returns.
 func (s *Store) Persist(update raft.Update) error {
+	return s.persist(update, nil)
+}
+
+// PersistSnapshot streams snapshot data while durably applying its Raft update.
+func (s *Store) PersistSnapshot(update raft.Update, writeData func(io.Writer) error) error {
+	if update.Snapshot == nil || writeData == nil {
+		return errors.New("streamed snapshot persistence requires metadata and a writer")
+	}
+	return s.persist(update, writeData)
+}
+
+func (s *Store) persist(update raft.Update, writeData func(io.Writer) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -101,7 +169,14 @@ func (s *Store) Persist(update raft.Update) error {
 		s.hard = *update.HardState
 	}
 	if update.Snapshot != nil {
-		if err := s.installSnapshot(*update.Snapshot); err != nil {
+		if writeData == nil {
+			data := append([]byte(nil), update.Snapshot.Data...)
+			writeData = func(writer io.Writer) error {
+				_, err := io.Copy(writer, bytes.NewReader(data))
+				return err
+			}
+		}
+		if err := s.installSnapshot(*update.Snapshot, writeData); err != nil {
 			return err
 		}
 	}
@@ -226,8 +301,8 @@ func readLog(f *os.File, snapshotIndex uint64) ([]raft.Entry, []int64, int64, er
 	}
 }
 
-func (s *Store) installSnapshot(snapshot raft.Snapshot) error {
-	if snapshot.Index == 0 || snapshot.Term == 0 || len(snapshot.Data) > maxSnapshotData {
+func (s *Store) installSnapshot(snapshot raft.Snapshot, writeData func(io.Writer) error) error {
+	if snapshot.Index == 0 || snapshot.Term == 0 {
 		return fmt.Errorf("invalid raft snapshot %d/%d (%d bytes)", snapshot.Index, snapshot.Term, len(snapshot.Data))
 	}
 	if snapshot.Index <= s.snapshot.Index {
@@ -244,13 +319,17 @@ func (s *Store) installSnapshot(snapshot raft.Snapshot) error {
 			suffix = append(suffix, cloneEntry(entry))
 		}
 	}
-	if err := storeSnapshot(s.dir, snapshot); err != nil {
+	size, checksum, err := storeSnapshotStream(s.dir, snapshot, writeData)
+	if err != nil {
 		return err
 	}
 	if err := s.rewriteLog(suffix); err != nil {
 		return err
 	}
+	snapshot.Data = nil
 	s.snapshot = cloneSnapshot(snapshot)
+	s.snapshotSize = size
+	s.snapshotChecksum = checksum
 	return nil
 }
 
@@ -306,84 +385,161 @@ func (s *Store) rewriteLog(entries []raft.Entry) error {
 	return err
 }
 
-func loadSnapshot(dir string) (raft.Snapshot, error) {
-	data, err := os.ReadFile(filepath.Join(dir, snapshotFile))
+func inspectSnapshot(dir string) (raft.Snapshot, uint64, uint32, error) {
+	f, err := os.Open(filepath.Join(dir, snapshotFile))
 	if errors.Is(err, os.ErrNotExist) {
-		return raft.Snapshot{}, nil
+		return raft.Snapshot{}, 0, 0, nil
 	}
 	if err != nil {
-		return raft.Snapshot{}, fmt.Errorf("read raft snapshot: %w", err)
+		return raft.Snapshot{}, 0, 0, fmt.Errorf("open raft snapshot: %w", err)
 	}
-	if len(data) < snapshotHeader+4 {
-		return raft.Snapshot{}, errors.New("raft snapshot is truncated")
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return raft.Snapshot{}, 0, 0, fmt.Errorf("stat raft snapshot: %w", err)
 	}
-	index := binary.BigEndian.Uint64(data[0:8])
-	term := binary.BigEndian.Uint64(data[8:16])
-	length := binary.BigEndian.Uint64(data[16:24])
-	baseEnd := uint64(snapshotHeader) + length
-	if index == 0 || term == 0 || length > maxSnapshotData || uint64(len(data)) < baseEnd+4 {
-		return raft.Snapshot{}, errors.New("raft snapshot header is invalid")
+	if info.Size() < snapshotHeader+4 {
+		return raft.Snapshot{}, 0, 0, errors.New("raft snapshot is truncated")
 	}
-	if crc32.ChecksumIEEE(data[:len(data)-4]) != binary.BigEndian.Uint32(data[len(data)-4:]) {
-		return raft.Snapshot{}, errors.New("raft snapshot checksum mismatch")
+	var header [snapshotHeader]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return raft.Snapshot{}, 0, 0, errors.New("raft snapshot is truncated")
 	}
+	index := binary.BigEndian.Uint64(header[0:8])
+	term := binary.BigEndian.Uint64(header[8:16])
+	length := binary.BigEndian.Uint64(header[16:24])
+	if index == 0 || term == 0 || length > maxSnapshotData || length > uint64(info.Size()-snapshotHeader-4) || length > uint64(^uint64(0)-snapshotHeader-8) {
+		return raft.Snapshot{}, 0, 0, errors.New("raft snapshot header is invalid")
+	}
+	baseEnd := int64(snapshotHeader) + int64(length)
 	var membership raft.Membership
-	if uint64(len(data)) != baseEnd+4 {
-		if uint64(len(data)) < baseEnd+8 {
-			return raft.Snapshot{}, errors.New("raft snapshot membership is truncated")
+	if info.Size() != baseEnd+4 {
+		if info.Size() < baseEnd+8 {
+			return raft.Snapshot{}, 0, 0, errors.New("raft snapshot membership is truncated")
 		}
-		membershipLen := uint64(binary.BigEndian.Uint32(data[baseEnd : baseEnd+4]))
-		if uint64(len(data)) != baseEnd+4+membershipLen+4 {
-			return raft.Snapshot{}, errors.New("raft snapshot membership length is invalid")
+		var lengthBytes [4]byte
+		if _, err := f.ReadAt(lengthBytes[:], baseEnd); err != nil {
+			return raft.Snapshot{}, 0, 0, errors.New("raft snapshot membership is truncated")
 		}
-		if err := json.Unmarshal(data[baseEnd+4:baseEnd+4+membershipLen], &membership); err != nil {
-			return raft.Snapshot{}, fmt.Errorf("decode snapshot membership: %w", err)
+		membershipLen := uint64(binary.BigEndian.Uint32(lengthBytes[:]))
+		if membershipLen > 1<<20 || uint64(info.Size()) != uint64(baseEnd)+4+membershipLen+4 {
+			return raft.Snapshot{}, 0, 0, errors.New("raft snapshot membership length is invalid")
+		}
+		membershipData := make([]byte, membershipLen)
+		if _, err := f.ReadAt(membershipData, baseEnd+4); err != nil {
+			return raft.Snapshot{}, 0, 0, errors.New("raft snapshot membership is truncated")
+		}
+		if err := json.Unmarshal(membershipData, &membership); err != nil {
+			return raft.Snapshot{}, 0, 0, fmt.Errorf("decode snapshot membership: %w", err)
 		}
 	}
-	return raft.Snapshot{Index: index, Term: term, Data: append([]byte(nil), data[snapshotHeader:baseEnd]...), Membership: membership}, nil
+	var storedChecksum [4]byte
+	if _, err := f.ReadAt(storedChecksum[:], info.Size()-4); err != nil {
+		return raft.Snapshot{}, 0, 0, errors.New("raft snapshot checksum is truncated")
+	}
+	wholeHash := crc32.NewIEEE()
+	if _, err := io.CopyN(wholeHash, io.NewSectionReader(f, 0, info.Size()-4), info.Size()-4); err != nil {
+		return raft.Snapshot{}, 0, 0, fmt.Errorf("checksum raft snapshot: %w", err)
+	}
+	if wholeHash.Sum32() != binary.BigEndian.Uint32(storedChecksum[:]) {
+		return raft.Snapshot{}, 0, 0, errors.New("raft snapshot checksum mismatch")
+	}
+	dataHash := crc32.NewIEEE()
+	if _, err := io.CopyN(dataHash, io.NewSectionReader(f, snapshotHeader, int64(length)), int64(length)); err != nil {
+		return raft.Snapshot{}, 0, 0, fmt.Errorf("checksum raft snapshot data: %w", err)
+	}
+	return raft.Snapshot{Index: index, Term: term, Membership: membership}, length, dataHash.Sum32(), nil
 }
 
 func storeSnapshot(dir string, snapshot raft.Snapshot) error {
+	_, _, err := storeSnapshotStream(dir, snapshot, func(writer io.Writer) error {
+		_, err := io.Copy(writer, bytes.NewReader(snapshot.Data))
+		return err
+	})
+	return err
+}
+
+func storeSnapshotStream(dir string, snapshot raft.Snapshot, writeData func(io.Writer) error) (uint64, uint32, error) {
 	membership, err := json.Marshal(snapshot.Membership)
 	if err != nil {
-		return fmt.Errorf("encode snapshot membership: %w", err)
+		return 0, 0, fmt.Errorf("encode snapshot membership: %w", err)
 	}
-	buf := make([]byte, snapshotHeader+len(snapshot.Data)+4+len(membership)+4)
-	binary.BigEndian.PutUint64(buf[0:8], snapshot.Index)
-	binary.BigEndian.PutUint64(buf[8:16], snapshot.Term)
-	binary.BigEndian.PutUint64(buf[16:24], uint64(len(snapshot.Data)))
-	copy(buf[snapshotHeader:], snapshot.Data)
-	membershipOffset := snapshotHeader + len(snapshot.Data)
-	binary.BigEndian.PutUint32(buf[membershipOffset:membershipOffset+4], uint32(len(membership)))
-	copy(buf[membershipOffset+4:], membership)
-	binary.BigEndian.PutUint32(buf[len(buf)-4:], crc32.ChecksumIEEE(buf[:len(buf)-4]))
 	tmp := filepath.Join(dir, ".SNAPSHOT.tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("create snapshot temp: %w", err)
+		return 0, 0, fmt.Errorf("create snapshot temp: %w", err)
 	}
 	ok := false
 	defer func() {
 		if !ok {
+			_ = f.Close()
 			_ = os.Remove(tmp)
 		}
 	}()
-	if _, err := f.Write(buf); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write snapshot: %w", err)
+	var header [snapshotHeader]byte
+	binary.BigEndian.PutUint64(header[0:8], snapshot.Index)
+	binary.BigEndian.PutUint64(header[8:16], snapshot.Term)
+	if _, err := f.Write(header[:]); err != nil {
+		return 0, 0, fmt.Errorf("write snapshot header: %w", err)
+	}
+	dataHash := crc32.NewIEEE()
+	start, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("locate snapshot data: %w", err)
+	}
+	if err := writeData(&boundedSnapshotWriter{writer: io.MultiWriter(f, dataHash)}); err != nil {
+		return 0, 0, fmt.Errorf("write snapshot data: %w", err)
+	}
+	end, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("measure snapshot data: %w", err)
+	}
+	dataSize := uint64(end - start)
+	binary.BigEndian.PutUint64(header[16:24], dataSize)
+	if _, err := f.WriteAt(header[:], 0); err != nil {
+		return 0, 0, fmt.Errorf("finalize snapshot header: %w", err)
+	}
+	if _, err := f.Seek(end, io.SeekStart); err != nil {
+		return 0, 0, fmt.Errorf("seek snapshot metadata: %w", err)
+	}
+	var membershipLength [4]byte
+	binary.BigEndian.PutUint32(membershipLength[:], uint32(len(membership)))
+	if _, err := f.Write(membershipLength[:]); err != nil {
+		return 0, 0, fmt.Errorf("write snapshot membership length: %w", err)
+	}
+	if _, err := f.Write(membership); err != nil {
+		return 0, 0, fmt.Errorf("write snapshot membership: %w", err)
+	}
+	checksumEnd, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("measure snapshot: %w", err)
+	}
+	wholeHash := crc32.NewIEEE()
+	if _, err := io.CopyN(wholeHash, io.NewSectionReader(f, 0, checksumEnd), checksumEnd); err != nil {
+		return 0, 0, fmt.Errorf("checksum snapshot: %w", err)
+	}
+	if _, err := f.Seek(checksumEnd, io.SeekStart); err != nil {
+		return 0, 0, fmt.Errorf("seek snapshot checksum: %w", err)
+	}
+	var checksum [4]byte
+	binary.BigEndian.PutUint32(checksum[:], wholeHash.Sum32())
+	if _, err := f.Write(checksum[:]); err != nil {
+		return 0, 0, fmt.Errorf("write snapshot checksum: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("sync snapshot: %w", err)
+		return 0, 0, fmt.Errorf("sync snapshot: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close snapshot: %w", err)
+		return 0, 0, fmt.Errorf("close snapshot: %w", err)
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, snapshotFile)); err != nil {
-		return fmt.Errorf("publish snapshot: %w", err)
+		return 0, 0, fmt.Errorf("publish snapshot: %w", err)
 	}
 	ok = true
-	return syncDir(dir)
+	if err := syncDir(dir); err != nil {
+		return 0, 0, err
+	}
+	return dataSize, dataHash.Sum32(), nil
 }
 
 func syncDir(dir string) error {

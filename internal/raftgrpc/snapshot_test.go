@@ -15,6 +15,46 @@ type chunkReceiver struct {
 	index  int
 }
 
+type generatedSnapshotReceiver struct {
+	total    uint64
+	offset   uint64
+	checksum uint32
+	data     []byte
+}
+
+func (r *generatedSnapshotReceiver) Recv() (*lsmdbv1.SnapshotChunk, error) {
+	if r.offset == r.total {
+		return nil, io.EOF
+	}
+	size := min(uint64(len(r.data)), r.total-r.offset)
+	chunk := &lsmdbv1.SnapshotChunk{
+		From: 1, To: 2, RaftTerm: 4, SnapshotIndex: 9, SnapshotTerm: 3,
+		Offset: r.offset, TotalSize: r.total, Checksum: r.checksum,
+		Data: r.data[:int(size)], Voters: []uint64{1, 2, 3}, MembershipIndex: 7,
+	}
+	r.offset += size
+	return chunk, nil
+}
+
+func TestReceiveSnapshotStreamsBeyondFormer256MiBLimit(t *testing.T) {
+	total := uint64(257 << 20)
+	block := make([]byte, SnapshotChunkBytes)
+	hash := crc32.NewIEEE()
+	for remaining := total; remaining > 0; {
+		size := min(uint64(len(block)), remaining)
+		_, _ = hash.Write(block[:int(size)])
+		remaining -= size
+	}
+	receiver := &generatedSnapshotReceiver{total: total, checksum: hash.Sum32(), data: block}
+	message, err := ReceiveSnapshotTo(receiver, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Snapshot == nil || message.Snapshot.Index != 9 || len(message.Snapshot.Data) != 0 {
+		t.Fatalf("snapshot metadata = %#v", message.Snapshot)
+	}
+}
+
 func (r *chunkReceiver) Recv() (*lsmdbv1.SnapshotChunk, error) {
 	if r.index == len(r.chunks) {
 		return nil, io.EOF

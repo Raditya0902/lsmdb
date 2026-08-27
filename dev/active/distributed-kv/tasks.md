@@ -4,7 +4,7 @@ Last updated: 2026-08-27
 
 ## Current Phase
 
-The five-node Compose profile and membership workflow are complete and verified.
+Disk-streamed snapshots beyond the former in-memory image limit are complete and verified.
 
 ## Completed
 
@@ -50,6 +50,11 @@ The five-node Compose profile and membership workflow are complete and verified.
 - [x] Test add, restart, leader removal, continued writes, joint partitions, and snapshot restore.
 - [x] Add an optional five-node Compose profile with a three-voter bootstrap configuration.
 - [x] Document membership expansion, verification, removal, and restart behavior.
+- [x] Stream logical LSM snapshot export and atomic replacement.
+- [x] Stream durable Raft snapshot publication, loading, and recovery.
+- [x] Stream outbound and receive-side gRPC snapshot data through bounded buffers.
+- [x] Keep production snapshot bytes out of the deterministic Raft module.
+- [x] Validate a 257 MiB stream with a 1 MiB buffer and a 64 GiB safety ceiling.
 
 ## In Progress
 
@@ -150,6 +155,14 @@ The five-node Compose profile and membership workflow are complete and verified.
 - 2026-08-27 — post-profile `go test -race ./...` — PASS.
 - 2026-08-27 — post-profile `go vet ./...` — PASS.
 - 2026-08-27 — post-profile `./scripts/docker-smoke.sh` three-node failover/restart — PASS.
+- 2026-08-27 — streamed LSM replacement and interrupted-publication tests — PASS.
+- 2026-08-27 — generated 257 MiB receive stream through a 1 MiB buffer — PASS.
+- 2026-08-27 — streamed offline-follower snapshot catch-up, three consecutive runs — PASS.
+- 2026-08-27 — post-disk-streaming `go test ./...` — PASS.
+- 2026-08-27 — post-disk-streaming `go test -race ./...` — PASS.
+- 2026-08-27 — post-disk-streaming `go vet ./...` — PASS.
+- 2026-08-27 — post-disk-streaming default and five-node Compose configuration — PASS.
+- 2026-08-27 — post-disk-streaming `./scripts/docker-smoke.sh` — PASS.
 
 ## Blockers
 
@@ -158,4 +171,4 @@ changes replicate voter IDs but do not distribute addresses.
 
 ## Next Task
 
-Select the next deferred evolution item; no implementation task is currently scheduled.
+Design runtime peer-address discovery without weakening replicated voter membership.

@@ -345,9 +345,14 @@ the consensus core.
 
 The gRPC adapter divides each logical snapshot message into ordered 1 MiB chunks.
 Every chunk repeats immutable transfer metadata, and the receiver verifies exact
-offsets, declared length, and a whole-image CRC before delivering the snapshot to
-the runtime. Interrupted or inconsistent streams therefore cannot publish partial
-state. Only one snapshot stream per peer may be in flight.
+offsets, declared length, and a whole-image CRC while writing a staging file.
+Only after the complete stream validates does the runtime deliver its metadata
+to Raft, atomically publish the durable image, and stream it into a replacement
+SSTable generation. Interrupted or inconsistent streams therefore cannot publish
+partial state. The deterministic Raft core carries snapshot index, term, and
+membership rather than production image bytes; the stable-store and transport
+adapters stream those bytes through bounded buffers. Only one snapshot stream
+per peer may be in flight.
 
 ### Election and partition behavior
 
@@ -401,9 +406,9 @@ linearizable read.
 - **No distributed range scans.** Embedded range scans exist, but the network
   interface intentionally exposes only point operations in the MVP.
 - **No compression.** All bytes are stored verbatim.
-- **In-memory snapshot images.** Transfer is chunked, but snapshot creation and
-  receive-side reassembly are capped at 256 MiB rather than streamed through a
-  temporary file.
+- **Snapshot size ceiling.** Creation, durable recovery, and transfer are
+  disk-streamed, but the development transport rejects images larger than
+  64 GiB.
 - **Preconfigured peer addresses and plaintext transport.** Membership can
   change, but runtime address discovery, TLS, authentication, and rolling upgrades
   are deferred.

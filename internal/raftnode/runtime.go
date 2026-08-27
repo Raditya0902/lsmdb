@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -15,20 +16,23 @@ import (
 // StableStore persists effects emitted by the Raft module.
 type StableStore interface {
 	Persist(raft.Update) error
+	PersistSnapshot(raft.Update, func(io.Writer) error) error
+	OpenSnapshot(index uint64) (reader io.ReadCloser, size uint64, checksum uint32, err error)
 	Close() error
 }
 
 // Transport sends an asynchronous Raft message to another node.
 type Transport interface {
 	Send(context.Context, raft.Message) error
+	SendSnapshot(context.Context, raft.Message, io.Reader, uint64, uint32) error
 }
 
 // StateMachine applies committed entries in strict index order.
 type StateMachine interface {
 	Apply(index uint64, command []byte) error
 	AppliedIndex() uint64
-	Snapshot() (index uint64, data []byte, err error)
-	Restore(index uint64, data []byte) error
+	WriteSnapshot(io.Writer) (index uint64, err error)
+	RestoreSnapshot(index uint64, size uint64, reader io.Reader) error
 	Close() error
 }
 
@@ -56,8 +60,9 @@ type membershipEvent struct {
 }
 
 type messageEvent struct {
-	message raft.Message
-	result  chan error
+	message      raft.Message
+	snapshotData io.Reader
+	result       chan error
 }
 
 type statusEvent struct{ result chan raft.Status }
@@ -155,9 +160,37 @@ func (r *Runtime) ChangeMembership(ctx context.Context, voters []uint64) (uint64
 
 // Step enqueues an inbound protocol message.
 func (r *Runtime) Step(ctx context.Context, message raft.Message) error {
+	return r.step(ctx, message, nil)
+}
+
+// StepSnapshot enqueues an inbound snapshot whose validated bytes are streamed
+// separately from the deterministic Raft message metadata.
+func (r *Runtime) StepSnapshot(ctx context.Context, message raft.Message, data io.Reader) error {
+	if data == nil {
+		return errors.New("snapshot data reader is required")
+	}
 	result := make(chan error, 1)
 	select {
-	case r.events <- messageEvent{message: message, result: result}:
+	case r.events <- messageEvent{message: message, snapshotData: data, result: result}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.done:
+		return raft.ErrStopped
+	}
+	// Once enqueued, the runtime owns the stream until persistence finishes. An
+	// RPC cancellation cannot revoke its reader while the Raft update is applying.
+	select {
+	case err := <-result:
+		return err
+	case <-r.done:
+		return raft.ErrStopped
+	}
+}
+
+func (r *Runtime) step(ctx context.Context, message raft.Message, data io.Reader) error {
+	result := make(chan error, 1)
+	select {
+	case r.events <- messageEvent{message: message, snapshotData: data, result: result}:
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-r.done:
@@ -271,7 +304,7 @@ func (r *Runtime) run(tickInterval time.Duration) {
 					return
 				}
 			case messageEvent:
-				err := r.processUpdate(r.node.Step(event.message), pending, pendingReads)
+				err := r.processUpdateWithSnapshot(r.node.Step(event.message), event.snapshotData, pending, pendingReads)
 				if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
 					r.acknowledgeRead(event.message, pendingReads)
 				}
@@ -313,12 +346,34 @@ func (r *Runtime) run(tickInterval time.Duration) {
 }
 
 func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
-	if err := r.store.Persist(update); err != nil {
+	return r.processUpdateWithSnapshot(update, nil, pending, pendingReads)
+}
+
+func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.Reader, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
+	var err error
+	if update.Snapshot != nil && snapshotData != nil {
+		err = r.store.PersistSnapshot(update, func(writer io.Writer) error {
+			_, copyErr := io.Copy(writer, snapshotData)
+			return copyErr
+		})
+	} else {
+		err = r.store.Persist(update)
+	}
+	if err != nil {
 		return fmt.Errorf("persist raft update: %w", err)
 	}
 	if update.Snapshot != nil && r.machine.AppliedIndex() < update.Snapshot.Index {
-		if err := r.machine.Restore(update.Snapshot.Index, update.Snapshot.Data); err != nil {
-			return fmt.Errorf("restore state snapshot %d: %w", update.Snapshot.Index, err)
+		reader, size, _, err := r.store.OpenSnapshot(update.Snapshot.Index)
+		if err != nil {
+			return fmt.Errorf("open state snapshot %d: %w", update.Snapshot.Index, err)
+		}
+		restoreErr := r.machine.RestoreSnapshot(update.Snapshot.Index, size, reader)
+		closeErr := reader.Close()
+		if restoreErr != nil {
+			return fmt.Errorf("restore state snapshot %d: %w", update.Snapshot.Index, restoreErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close state snapshot %d: %w", update.Snapshot.Index, closeErr)
 		}
 	}
 	for _, message := range update.Messages {
@@ -358,15 +413,21 @@ func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingPr
 	if r.snapshotThreshold > 0 {
 		status := r.node.Status()
 		if applied := r.machine.AppliedIndex(); applied > status.SnapshotIndex && applied-status.SnapshotIndex >= r.snapshotThreshold {
-			index, data, err := r.machine.Snapshot()
-			if err != nil {
-				return fmt.Errorf("create state snapshot: %w", err)
-			}
-			snapshotUpdate, err := r.node.CreateSnapshot(index, data)
+			index := applied
+			snapshotUpdate, err := r.node.CreateSnapshot(index, nil)
 			if err != nil {
 				return fmt.Errorf("compact raft log: %w", err)
 			}
-			if err := r.store.Persist(snapshotUpdate); err != nil {
+			if err := r.store.PersistSnapshot(snapshotUpdate, func(writer io.Writer) error {
+				writtenIndex, writeErr := r.machine.WriteSnapshot(writer)
+				if writeErr != nil {
+					return writeErr
+				}
+				if writtenIndex != index {
+					return fmt.Errorf("state snapshot index changed from %d to %d", index, writtenIndex)
+				}
+				return nil
+			}); err != nil {
 				return fmt.Errorf("persist raft snapshot: %w", err)
 			}
 		}
@@ -412,11 +473,23 @@ func (r *Runtime) sendLoop() {
 		go func(message raft.Message) {
 			timeout := 500 * time.Millisecond
 			if message.Type == raft.MsgSnapshot {
-				timeout = 30 * time.Second
+				timeout = 30 * time.Minute
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			_ = r.transport.Send(ctx, message)
+			if message.Type != raft.MsgSnapshot {
+				_ = r.transport.Send(ctx, message)
+				return
+			}
+			if message.Snapshot == nil {
+				return
+			}
+			reader, size, checksum, err := r.store.OpenSnapshot(message.Snapshot.Index)
+			if err != nil {
+				return
+			}
+			defer reader.Close()
+			_ = r.transport.SendSnapshot(ctx, message, reader, size, checksum)
 		}(message)
 	}
 }

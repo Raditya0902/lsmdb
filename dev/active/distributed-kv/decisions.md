@@ -81,6 +81,18 @@ may be active at a time. Candidate node addresses must already exist in every
 node's transport peer map; address discovery and peer-map mutation remain a
 separate operational concern. A removed leader steps down after `C_new` commits.
 
+### D014 — Snapshot bytes stream through adapters, not consensus
+
+The deterministic Raft module continues to own snapshot index, term, membership,
+and compaction decisions, but production snapshot bytes remain in the durable
+store. The runtime streams state-machine export into atomic snapshot publication,
+opens the durable image for outbound transport, and streams accepted inbound
+images into state-machine replacement. The gRPC adapter stages and validates a
+complete stream before delivering its metadata to Raft. Byte-backed snapshots
+remain supported for deterministic core tests, but production paths must not
+materialize the complete image in memory. Snapshot streams have a 64 GiB safety
+limit; larger deployments require an explicitly revised operational limit.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

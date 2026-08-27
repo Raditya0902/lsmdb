@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -127,12 +128,25 @@ func StartNode(config NodeConfig) (*Node, error) {
 		return nil, fmt.Errorf("open raft store: %w", err)
 	}
 	hard, entries := store.Load()
-	snapshot := store.LoadSnapshot()
+	snapshot := store.SnapshotMetadata()
 	if snapshot.Index > machine.AppliedIndex() {
-		if err := machine.Restore(snapshot.Index, snapshot.Data); err != nil {
+		reader, size, _, openErr := store.OpenSnapshot(snapshot.Index)
+		if openErr != nil {
 			_ = store.Close()
 			_ = machine.Close()
-			return nil, fmt.Errorf("restore state snapshot: %w", err)
+			return nil, fmt.Errorf("open state snapshot: %w", openErr)
+		}
+		restoreErr := machine.RestoreSnapshot(snapshot.Index, size, reader)
+		closeErr := reader.Close()
+		if restoreErr != nil {
+			_ = store.Close()
+			_ = machine.Close()
+			return nil, fmt.Errorf("restore state snapshot: %w", restoreErr)
+		}
+		if closeErr != nil {
+			_ = store.Close()
+			_ = machine.Close()
+			return nil, fmt.Errorf("close state snapshot: %w", closeErr)
 		}
 	}
 	core, err := raft.New(raft.Config{
@@ -351,15 +365,35 @@ func (h *handler) Send(ctx context.Context, request *lsmdbv1.RaftMessage) (*lsmd
 }
 
 func (h *handler) InstallSnapshot(stream grpc.ClientStreamingServer[lsmdbv1.SnapshotChunk, lsmdbv1.RaftAck]) error {
-	message, err := raftgrpc.ReceiveSnapshot(stream)
+	tmp, err := os.CreateTemp(h.node.config.DataDir, ".snapshot-receive-*")
 	if err != nil {
+		return status.Error(codes.Internal, "create snapshot staging file")
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	message, err := raftgrpc.ReceiveSnapshotTo(stream, tmp)
+	if err != nil {
+		_ = tmp.Close()
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return status.Error(codes.Internal, "sync snapshot staging file")
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		_ = tmp.Close()
+		return status.Error(codes.Internal, "rewind snapshot staging file")
+	}
 	if message.To != h.node.config.ID {
+		_ = tmp.Close()
 		return status.Errorf(codes.InvalidArgument, "snapshot addressed to node %d", message.To)
 	}
-	if err := h.node.runtime.Step(stream.Context(), message); err != nil {
+	if err := h.node.runtime.StepSnapshot(stream.Context(), message, tmp); err != nil {
+		_ = tmp.Close()
 		return h.node.rpcError(err)
+	}
+	if err := tmp.Close(); err != nil {
+		return status.Error(codes.Internal, "close snapshot staging file")
 	}
 	return stream.SendAndClose(&lsmdbv1.RaftAck{})
 }

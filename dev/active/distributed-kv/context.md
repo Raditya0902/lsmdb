@@ -71,13 +71,13 @@ The MVP uses preconfigured peer addresses, plaintext local networking, single-ke
 operations, and leader-served point reads. Voters can change through joint
 consensus, but runtime address discovery is not included. It does not include
 transactions, distributed scans, authentication, or rolling upgrades.
-Snapshot transfer uses ordered 1 MiB gRPC chunks, while creation and receive-side
-reassembly remain bounded to a 256 MiB in-memory image.
+Snapshot creation, durable publication, recovery, and transfer use disk-backed
+streams and ordered 1 MiB gRPC chunks. Production paths do not retain a complete
+image in memory; the development transport limits images to 64 GiB.
 
 ## Deferred Evolution
 
-Next: disk-streamed snapshot images beyond 256 MiB, runtime peer-address
-discovery, optional stale follower reads, sharding/multi-Raft, TLS, and
-production operations. The local Compose environment has an optional five-node
-profile for exercising membership changes; five-node production operations are
-still deferred.
+Next: runtime peer-address discovery, optional stale follower reads,
+sharding/multi-Raft, TLS, and production operations. The local
+Compose environment has an optional five-node profile for exercising membership
+changes; five-node production operations are still deferred.

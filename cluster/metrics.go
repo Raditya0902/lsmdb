@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -126,6 +127,14 @@ type observedTransport struct {
 
 func (t *observedTransport) Send(ctx context.Context, message raft.Message) error {
 	err := t.inner.Send(ctx, message)
+	if err != nil {
+		t.metrics.transportFailures.WithLabelValues(strconv.FormatUint(message.To, 10)).Inc()
+	}
+	return err
+}
+
+func (t *observedTransport) SendSnapshot(ctx context.Context, message raft.Message, reader io.Reader, size uint64, checksum uint32) error {
+	err := t.inner.SendSnapshot(ctx, message, reader, size, checksum)
 	if err != nil {
 		t.metrics.transportFailures.WithLabelValues(strconv.FormatUint(message.To, 10)).Inc()
 	}

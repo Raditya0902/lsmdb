@@ -2,9 +2,12 @@
 package raftgrpc
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"sync"
 
 	lsmdbv1 "lsmdb/api/lsmdb/v1"
@@ -32,20 +35,32 @@ func New(peers map[uint64]string) *Transport {
 }
 
 func (t *Transport) Send(ctx context.Context, message raft.Message) error {
+	if message.Type == raft.MsgSnapshot {
+		if message.Snapshot == nil {
+			return errors.New("snapshot message has no snapshot")
+		}
+		data := message.Snapshot.Data
+		return t.SendSnapshot(ctx, message, bytes.NewReader(data), uint64(len(data)), crc32.ChecksumIEEE(data))
+	}
 	client, err := t.client(message.To)
 	if err != nil {
 		return err
 	}
-	if message.Type == raft.MsgSnapshot {
-		if !t.beginSnapshot(message.To) {
-			return nil
-		}
-		defer t.endSnapshot(message.To)
-		err = sendSnapshot(ctx, client, message)
-	} else {
-		_, err = client.Send(ctx, ToProto(message))
-	}
+	_, err = client.Send(ctx, ToProto(message))
 	return err
+}
+
+// SendSnapshot streams one durable snapshot image to a peer.
+func (t *Transport) SendSnapshot(ctx context.Context, message raft.Message, reader io.Reader, size uint64, checksum uint32) error {
+	if !t.beginSnapshot(message.To) {
+		return nil
+	}
+	defer t.endSnapshot(message.To)
+	client, err := t.client(message.To)
+	if err != nil {
+		return err
+	}
+	return sendSnapshot(ctx, client, message, reader, size, checksum)
 }
 
 func (t *Transport) beginSnapshot(peer uint64) bool {
@@ -64,26 +79,31 @@ func (t *Transport) endSnapshot(peer uint64) {
 	delete(t.snapshotInFlight, peer)
 }
 
-func sendSnapshot(ctx context.Context, client lsmdbv1.RaftClient, message raft.Message) error {
+func sendSnapshot(ctx context.Context, client lsmdbv1.RaftClient, message raft.Message, reader io.Reader, size uint64, checksum uint32) error {
 	if message.Snapshot == nil {
 		return fmt.Errorf("snapshot message has no snapshot")
 	}
-	data := message.Snapshot.Data
-	if len(data) > MaxSnapshotBytes {
+	if size > MaxSnapshotBytes {
 		return fmt.Errorf("snapshot exceeds %d bytes", MaxSnapshotBytes)
 	}
 	stream, err := client.InstallSnapshot(ctx)
 	if err != nil {
 		return err
 	}
-	checksum := crc32.ChecksumIEEE(data)
-	for offset := 0; offset < len(data) || (len(data) == 0 && offset == 0); offset += SnapshotChunkBytes {
-		end := min(offset+SnapshotChunkBytes, len(data))
+	buffer := make([]byte, SnapshotChunkBytes)
+	for offset := uint64(0); offset < size || (size == 0 && offset == 0); {
+		chunkSize := min(uint64(SnapshotChunkBytes), size-offset)
+		data := buffer[:int(chunkSize)]
+		if chunkSize > 0 {
+			if _, err := io.ReadFull(reader, data); err != nil {
+				return fmt.Errorf("read snapshot chunk at %d: %w", offset, err)
+			}
+		}
 		chunk := &lsmdbv1.SnapshotChunk{
 			From: message.From, To: message.To, RaftTerm: message.Term,
 			SnapshotIndex: message.Snapshot.Index, SnapshotTerm: message.Snapshot.Term,
-			Offset: uint64(offset), TotalSize: uint64(len(data)), Checksum: checksum,
-			Data:            append([]byte(nil), data[offset:end]...),
+			Offset: offset, TotalSize: size, Checksum: checksum,
+			Data:            append([]byte(nil), data...),
 			Voters:          append([]uint64(nil), message.Snapshot.Membership.Voters...),
 			JointVoters:     append([]uint64(nil), message.Snapshot.Membership.JointVoters...),
 			MembershipIndex: message.Snapshot.Membership.Index,
@@ -91,9 +111,14 @@ func sendSnapshot(ctx context.Context, client lsmdbv1.RaftClient, message raft.M
 		if err := stream.Send(chunk); err != nil {
 			return fmt.Errorf("send snapshot chunk at %d: %w", offset, err)
 		}
-		if len(data) == 0 {
+		if size == 0 {
 			break
 		}
+		offset += chunkSize
+	}
+	var trailing [1]byte
+	if n, err := io.ReadFull(reader, trailing[:]); n != 0 || !errors.Is(err, io.EOF) {
+		return errors.New("snapshot source exceeds declared size")
 	}
 	if _, err := stream.CloseAndRecv(); err != nil {
 		return fmt.Errorf("finish snapshot stream: %w", err)

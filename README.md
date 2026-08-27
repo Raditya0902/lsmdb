@@ -124,7 +124,9 @@ the cluster and starting again from voters 1–3.
 
 Nodes snapshot every 1,000 applied entries by default. Override this for local
 testing with `lsmdb-node -snapshot-threshold=N`. `Status` and Prometheus expose
-the snapshot index and retained log-entry count.
+the snapshot index and retained log-entry count. Snapshot creation, durable
+publication, recovery, and installation stream through bounded buffers; the
+development transport accepts images up to 64 GiB.
 
 ### Cluster benchmark
 
@@ -263,9 +265,9 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - **Preconfigured peer addresses.** Voter membership is dynamic, but node
   addresses must already exist in every process's peer map; runtime address
   discovery is not implemented.
-- **In-memory snapshot images.** Snapshot installation streams ordered 1 MiB
-  chunks with a whole-image checksum, but creation and reassembly remain bounded
-  to a 256 MiB in-memory image.
+- **Snapshot size ceiling.** Snapshot images stream through disk and ordered
+  1 MiB gRPC chunks instead of a full-image allocation, but the development
+  transport rejects images larger than 64 GiB.
 - **Point operations only over gRPC.** Distributed scans, transactions, and follower-stale reads are not exposed.
 - **Development security model.** The demo cluster uses plaintext gRPC with no authentication or rolling-upgrade protocol.
 

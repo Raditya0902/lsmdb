@@ -1,12 +1,94 @@
 package raftstore
 
 import (
+	"bytes"
+	"errors"
+	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"lsmdb/internal/raft"
 )
+
+func TestStoreStreamsSnapshotDataWithoutKeepingItInMetadata(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := bytes.Repeat([]byte("streamed-snapshot"), 64*1024)
+	wantSize := uint64(len(block) * 3)
+	snapshot := raft.Snapshot{Index: 1, Term: 1, Membership: raft.Membership{Voters: []uint64{1}, Index: 1}}
+	if err := store.PersistSnapshot(raft.Update{Snapshot: &snapshot}, func(writer io.Writer) error {
+		for i := 0; i < 3; i++ {
+			if _, err := writer.Write(block); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if metadata := store.SnapshotMetadata(); metadata.Index != 1 || len(metadata.Data) != 0 {
+		t.Fatalf("snapshot metadata = %#v", metadata)
+	}
+	reader, size, checksum, err := store.OpenSnapshot(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := crc32.NewIEEE()
+	read, err := io.Copy(hash, reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uint64(read) != wantSize || size != wantSize || checksum != hash.Sum32() {
+		t.Fatalf("stream = read %d size %d checksum %08x/%08x", read, size, checksum, hash.Sum32())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if metadata := reopened.SnapshotMetadata(); metadata.Index != 1 || len(metadata.Data) != 0 {
+		t.Fatalf("reopened metadata = %#v", metadata)
+	}
+}
+
+func TestFailedStreamedSnapshotDoesNotPublishOrCompactLog(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	entries := []raft.Entry{{Index: 1, Term: 1}, {Index: 2, Term: 1}}
+	if err := store.Persist(raft.Update{Entries: entries}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := raft.Snapshot{Index: 1, Term: 1}
+	wantErr := errors.New("injected snapshot failure")
+	err = store.PersistSnapshot(raft.Update{Snapshot: &snapshot}, func(writer io.Writer) error {
+		_, _ = writer.Write([]byte("partial"))
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("PersistSnapshot error = %v, want %v", err, wantErr)
+	}
+	if metadata := store.SnapshotMetadata(); metadata.Index != 0 {
+		t.Fatalf("failed snapshot published metadata %#v", metadata)
+	}
+	_, retained := store.Load()
+	if len(retained) != 2 || retained[0].Index != 1 || retained[1].Index != 2 {
+		t.Fatalf("failed snapshot compacted log: %#v", retained)
+	}
+}
 
 func TestStorePersistsHardStateAndLog(t *testing.T) {
 	dir := t.TempDir()

@@ -2,6 +2,7 @@ package raftnode_test
 
 import (
 	"context"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -31,12 +32,13 @@ func (m *memoryMachine) AppliedIndex() uint64 {
 	return m.applied
 }
 
-func (m *memoryMachine) Snapshot() (uint64, []byte, error) {
+func (m *memoryMachine) WriteSnapshot(writer io.Writer) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.applied, []byte("snapshot"), nil
+	_, err := writer.Write([]byte("snapshot"))
+	return m.applied, err
 }
-func (m *memoryMachine) Restore(index uint64, _ []byte) error {
+func (m *memoryMachine) RestoreSnapshot(index uint64, _ uint64, _ io.Reader) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.applied = index

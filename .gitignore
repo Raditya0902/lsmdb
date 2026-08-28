@@ -4,5 +4,6 @@ testdb*/
 dev/
 .claude/
 CLAUDE.md
+AGENTS.md
 *.test
 *.out

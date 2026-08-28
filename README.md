@@ -2,9 +2,24 @@
 
 # lsmdb
 
-A LevelDB-style LSM-tree key-value store implemented in Go, with a WAL, per-SSTable Bloom filters, size-tiered compaction, and a benchmark harness comparing it to SQLite.
+A Go key-value database with two intentionally separate modes:
+
+- An embedded LevelDB-style LSM engine with a WAL, memtable, immutable SSTables,
+  Bloom filters, sparse indexes, range scans, and size-tiered compaction.
+- A three-node Raft-replicated database, expandable to five nodes through joint
+  consensus, with quorum writes, linearizable reads, automatic failover,
+  snapshots, recovery, gRPC APIs, Prometheus metrics, and Docker Compose.
+
+Replica mode uses the embedded LSM engine as its state machine while keeping Raft
+as the only ordering and write-durability authority.
 
 ---
+
+## Requirements
+
+- Go 1.22 or newer
+- Docker with Compose v2 for the containerized cluster and observability stack
+- `protoc` plus the Go protobuf plugins only when regenerating checked-in API code
 
 ## Quick start
 
@@ -56,10 +71,49 @@ the retained Raft log and recover followers that fall behind the compacted
 prefix.
 
 ```text
-Client → gRPC leader → durable Raft majority → committed log index
-                                               ↓
-                         node 1 LSM   node 2 LSM   node 3 LSM
+                         Put / Delete / Get / Status / Members
+                                         │
+                                         ▼
+                                retrying gRPC client
+                                         │
+                         ┌───────────────┼───────────────┐
+                         ▼               ▼               ▼
+                    follower        Raft leader      follower
+                  leader hint      persist + order   leader hint
+                                         │
+                         replicate entry / snapshot chunks
+                              ┌──────────┴──────────┐
+                              ▼                     ▼
+                         follower log          follower log
+                              └──────────┬──────────┘
+                                         ▼
+                          majority durable → commit → apply
+                                         │
+                            Raft index = LSM sequence number
 ```
+
+### Consistency and failure guarantees
+
+- A successful write is persisted by a Raft majority, committed, and applied to
+  the leader's LSM state machine before the client receives success.
+- A linearizable `Get` confirms a current-term quorum and waits for the confirmed
+  commit index to apply before reading local state.
+- A leader without quorum cannot acknowledge writes or linearizable reads and
+  steps down after the configured quorum-check interval.
+- Commands apply once, in committed log order. Client ID and request sequence are
+  replicated atomically with each mutation so retries do not apply an older
+  request twice.
+- Recovery restores the newest durable logical snapshot and replays the retained
+  committed log suffix. Uncommitted entries never reach the LSM state machine.
+- Pre-vote limits disruption from isolated followers, and joint consensus
+  requires majorities of both the old and new voter sets during reconfiguration.
+
+### Durability modes
+
+| Mode | Ordering and recovery authority | Sequence number | Sync behavior |
+|---|---|---|---|
+| Embedded | Engine WAL, manifest, and SSTables | Allocated by the engine | The WAL syncs on `Close`; durable manifest/SSTable publication is synchronized |
+| Replica | Durable Raft log and snapshot | Committed Raft log index | Term, vote, and dependent log changes sync before protocol responses; snapshots publish before log-prefix deletion |
 
 Start the complete cluster, Prometheus, and Grafana:
 
@@ -78,16 +132,47 @@ docker compose exec node1 lsmdbctl \
 - Prometheus: <http://localhost:9090>
 - Grafana: <http://localhost:3000> (anonymous viewer enabled)
 
+For a manual deployment, run `go run ./cmd/lsmdb-node` once per node. Important
+node flags are:
+
+| Flag | Meaning |
+|---|---|
+| `-id` | Positive, stable Raft node ID |
+| `-listen` | gRPC listen address |
+| `-metrics` | HTTP address serving `/healthz` and `/metrics` |
+| `-data-dir` | Persistent Raft and LSM directory |
+| `-peers` | Static `ID=host:port` mappings |
+| `-voters` | Bootstrap voters for a fresh data directory; defaults to static peer IDs |
+| `-peer-file` | Optional refreshable JSON peer directory |
+| `-peer-refresh` | Minimum peer-directory reload interval; default one second |
+| `-snapshot-threshold` | Applied entries between snapshots; default 1,000 |
+
+All nodes in a fresh cluster must use the same bootstrap voter set. A restarted
+node recovers membership from durable Raft state rather than reapplying
+`-voters`. `SIGINT` or `SIGTERM` triggers graceful shutdown of the gRPC server,
+Raft runtime, stable store, and LSM state machine.
+
 Run the automated leader-failure exercise with:
 
 ```bash
 ./scripts/docker-smoke.sh
 ```
 
-The network interface supports `Put`, `Delete`, linearizable `Get`, and
-`Status`. Followers return a typed leader hint; the Go client automatically
-retries with the same client ID/request sequence, preventing a delayed retry
-from reapplying an older write after failover.
+The public gRPC interface is defined in
+[`api/lsmdb/v1/lsmdb.proto`](api/lsmdb/v1/lsmdb.proto):
+
+| RPC | Semantics | Result |
+|---|---|---|
+| `Put` | Quorum-replicated mutation with client retry identity | Raft term and committed log index |
+| `Delete` | Quorum-replicated tombstone | Raft term and committed log index |
+| `Get` | Leader-served linearizable point read | Found/value and confirmed read index |
+| `Status` | Local role, indexes, snapshot, peers, and voter configuration | Diagnostic state |
+| `ChangeMembership` | Leader-only joint-consensus voter replacement | Final configuration log index |
+
+Keys must contain 1 byte through 16 KiB and values may contain at most 4 MiB.
+Followers return a typed leader hint; the Go client retries through leader
+changes while retaining the same client ID and request sequence. The `lsmdbctl`
+commands are `put`, `delete`, `get`, `status`, and `members`.
 
 Membership changes use Raft joint consensus. Every candidate node ID must resolve
 through either `-peers` or `-peer-file` before the change begins; use
@@ -152,6 +237,14 @@ the snapshot index and retained log-entry count. Snapshot creation, durable
 publication, recovery, and installation stream through bounded buffers; the
 development transport accepts images up to 64 GiB.
 
+### Observability
+
+Each configured metrics address serves `GET /healthz` and `GET /metrics`.
+Prometheus collects Raft role, term, leader ID, commit/applied/snapshot indexes,
+retained log length, per-peer replication lag, elections, leadership changes,
+quorum-loss stepdowns, proposal outcomes, transport failures, and gRPC request
+counts/latencies. Compose provisions Prometheus and a Grafana Raft dashboard.
+
 ### Cluster benchmark
 
 `go run ./cmd/clusterbench` starts a fresh local three-node cluster, measures
@@ -195,7 +288,7 @@ Run the commands on the target machine before using the numbers in a résumé.
 
 ## Architecture
 
-### Write path
+### Embedded write path
 
 ```
 Set(key, val)
@@ -210,10 +303,12 @@ Set(key, val)
             │
             │  [SSTable count >= CompactionThreshold]
             ▼
-        K-way merge → new SSTable  (old files deleted after new one is written)
+        K-way merge → new SSTable
+                │
+                └─► sync file + atomically publish manifest + delete obsolete files
 ```
 
-### Read path
+### Embedded read path
 
 ```
 Get(key)
@@ -233,21 +328,88 @@ Get(key)
                     └─► miss: try next SSTable
 ```
 
+### Replicated write path
+
+```text
+client Put/Delete
+       │
+       ▼
+leader validates client ID + stable request sequence
+       │
+       ▼
+append Raft entry → sync leader log → replicate
+       │                              │
+       │                     followers sync log
+       └──────────── majority acknowledgment ────────────┐
+                                                         ▼
+                                             commit in current term
+                                                         │
+                                                         ▼
+                              apply mutation + dedup metadata atomically
+                                                         │
+                                                         ▼
+                                      publish applied Raft index to LSM
+```
+
+### Linearizable read and recovery path
+
+```text
+Get → leader confirms current-term quorum → waits for read index to apply → LSM Get
+
+restart → load hard state + snapshot → restore LSM snapshot
+        → replay committed retained entries newer than applied watermark
+
+lagging follower below compacted prefix
+        → receive ordered 1 MiB snapshot chunks
+        → verify offsets, size, metadata, and whole-image CRC
+        → sync staged snapshot → install atomically → resume log replication
+```
+
 ---
 
 ## Components
 
-| Component     | Responsibility                                                                        | Key file                        |
-| ------------- | ------------------------------------------------------------------------------------- | ------------------------------- |
-| `MemTable`    | In-memory write buffer; holds the most recent record per key                          | `internal/memtable/memtable.go` |
-| `WAL`         | Binary append log with CRC32 per record; replayed on startup for crash recovery       | `internal/wal/wal.go`           |
-| `SSTable`     | Immutable sorted file; data records + metadata + Bloom filter + sparse index + footer | `internal/sstable/`             |
-| `BloomFilter` | Probabilistic per-SSTable skip filter; eliminates disk reads for absent keys          | `internal/bloom/bloom.go`       |
-| `Compactor`   | K-way heap merge across all SSTables; drops tombstones at the bottom level            | `internal/compact/compactor.go` |
-| `DB`          | Public API (`Open`, `Get`, `Set`, `Delete`, `Scan`, `Close`); orchestrates all components | `db/db.go`                      |
-| `Raft`        | Deterministic elections, replication, commit, pre-vote, and quorum checking             | `internal/raft/`               |
-| `Raft store`  | Durable term/vote and CRC-protected replicated log                                      | `internal/raftstore/`          |
-| `Cluster`     | gRPC node, linearizable KV handlers, leader hints, and retrying Go client                | `cluster/`                     |
+| Component | Responsibility | Location |
+|---|---|---|
+| Embedded DB | Public `Open`, `Get`, `Set`, `Delete`, `Scan`, and `Close` API | `db/` |
+| Memtable and WAL | Latest in-memory records plus CRC-protected embedded recovery log | `internal/memtable/`, `internal/wal/` |
+| SSTables and Bloom filters | Immutable sorted data, sparse indexes, range checks, and negative-lookup filtering | `internal/sstable/`, `internal/bloom/` |
+| Manifest and compactor | Atomic live-file publication and K-way size-tiered merging | `internal/manifest/`, `internal/compact/` |
+| Replica state machine | Externally indexed atomic mutation/dedup batches and logical snapshots | `internal/kvstate/`, `db/replica_*` |
+| Deterministic Raft | Elections, pre-vote, replication, reads, snapshots, and joint membership | `internal/raft/` |
+| Raft runtime | Single-owner event loop, persist-before-send ordering, application, and snapshot triggers | `internal/raftnode/` |
+| Stable store | Synced hard state, CRC-protected log, snapshots, recovery, and prefix compaction | `internal/raftstore/` |
+| Transport adapters | gRPC transport with streamed snapshots and deterministic faultable in-memory networking | `internal/raftgrpc/`, `internal/raftnet/` |
+| Cluster API | Node lifecycle, KV handlers, retrying client, peer discovery, and metrics | `cluster/` |
+| Commands | Node server, client, cluster benchmark, and embedded benchmark | `cmd/` |
+| Operations | Compose cluster, Prometheus, Grafana, health checks, and smoke automation | `docker-compose.yml`, `deploy/`, `scripts/` |
+
+---
+
+## Testing and verification
+
+Run the release verification matrix from the repository root:
+
+```bash
+gofmt -w <changed-go-files>
+go test ./...
+go test -race ./...
+go vet ./...
+docker compose config
+docker compose --profile five-node config
+./scripts/docker-smoke.sh
+```
+
+The tests include embedded correctness, persistence, recovery, scans, compaction,
+Bloom filters, externally indexed replica application, deterministic Raft
+elections and partitions, durable-log corruption recovery, snapshot streaming,
+joint-consensus membership, node restart/failover, and discovered-voter
+integration coverage. GitHub Actions runs the Go verification and Docker smoke
+jobs on pushes and pull requests.
+
+Generated protobuf Go files are checked in. Edit the `.proto` source rather than
+generated `.pb.go` files; the exact regeneration command is documented at the
+top of [`api/lsmdb/v1/lsmdb.proto`](api/lsmdb/v1/lsmdb.proto).
 
 ---
 
@@ -303,7 +465,10 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 
 ## Limitations
 
-- **Single writer.** `db.mu` serialises all writes. There is no concurrent write path.
+- **Embedded single writer.** `db.mu` serialises embedded writes.
+- **No Raft group commit.** Concurrent client proposals share one event loop and
+  each persistence update syncs independently, so concurrent write throughput is
+  currently worse than the single-client path.
 - **No compression.** Keys and values are written verbatim. There is no snappy/zstd layer.
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
@@ -316,6 +481,9 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
   transport rejects images larger than 64 GiB.
 - **Point operations only over gRPC.** Distributed scans, transactions, and follower-stale reads are not exposed.
 - **Development security model.** The demo cluster uses plaintext gRPC with no authentication or rolling-upgrade protocol.
+- **Five-node profile is operational practice, not production guidance.** It
+  exercises joint-consensus expansion locally; automated placement, upgrades,
+  disaster recovery, and production five-node operations remain out of scope.
 
 ---
 
@@ -324,6 +492,20 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - Leveled compaction (L0→L1→L2) to bound read amplification without growing a single large SSTable
 - Block compression (snappy or zstd) for the SSTable data section
 - Concurrent readers with a read-lock-free SSTable list snapshot
+- Group commit and proposal batching for concurrent replicated-write throughput
+- Optional stale follower reads without changing the default linearizable API
+- Consistent-hash sharding or multi-Raft with explicit replica placement
+- TLS, authentication, integrated service discovery, and rolling upgrades
+- Distributed scans and multi-key transactions
+
+## Further documentation
+
+- [`DESIGN.md`](DESIGN.md) — storage formats, correctness boundaries, Raft
+  behavior, snapshots, membership, and measured limitations
+- [`api/lsmdb/v1/lsmdb.proto`](api/lsmdb/v1/lsmdb.proto) — public and internal
+  gRPC contracts plus the reproducible generation command
+- [`dev/active/distributed-kv/`](dev/active/distributed-kv/) — implementation
+  plan, architectural context, accepted decisions, and verification history
 
 ---
 

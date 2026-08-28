@@ -10,7 +10,6 @@ The v1.0.0 release is complete and verified.
 
 - [x] Confirm existing repository structure and embedded interface.
 - [x] Run baseline `go test ./...` successfully.
-- [x] Add root `AGENTS.md` with invariants and working rules.
 - [x] Add distributed KV context, plan, decisions, and task tracker.
 - [x] Implement atomic JSON manifest publication with file and directory sync.
 - [x] Make flush and compaction publish the live SSTable generation before cleanup.
@@ -63,6 +62,7 @@ The v1.0.0 release is complete and verified.
 - [x] Add independent-client concurrency and isolated deadlines to the cluster benchmark.
 - [x] Record five-run serial and four-client benchmark medians and ranges.
 - [x] Refresh the public benchmark environment, results, limitations, and discovery wording.
+- [x] Expand the README with the complete v1 architecture, guarantees, APIs, operations, testing, and roadmap.
 
 ## In Progress
 
@@ -186,6 +186,10 @@ None.
 - 2026-08-27 — v1.0.0 `go vet ./...` — PASS.
 - 2026-08-27 — v1.0.0 default and five-node Compose configuration — PASS.
 - 2026-08-27 — v1.0.0 `./scripts/docker-smoke.sh` — PASS.
+- 2026-08-27 — expanded README link, ignore-state, and whitespace validation — PASS.
+- 2026-08-27 — post-documentation `go test ./...` — PASS.
+- 2026-08-27 — post-documentation `go vet ./...` — PASS.
+- 2026-08-27 — post-documentation default and five-node Compose configuration — PASS.
 
 ## Blockers
 

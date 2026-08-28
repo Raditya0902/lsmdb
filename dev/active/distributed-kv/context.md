@@ -21,8 +21,9 @@ git status --short: clean before Phase 0 files
 
 ## Target System
 
-The first distributed release defaults to three voters with statically
-preconfigured peer addresses; voter IDs can change through joint consensus.
+The first distributed release defaults to three voters. Voter IDs change
+through joint consensus while peer addresses resolve through static or
+refreshable runtime directories outside replicated consensus state.
 Clients send `Put`, `Delete`, and linearizable `Get` requests over gRPC. One Raft
 leader orders mutations; a write succeeds only after majority persistence,
 commit, and local application. Followers return a typed leader hint and the Go
@@ -67,17 +68,18 @@ sequence as one externally indexed batch, making retries deterministic.
 
 ## First-Release Limits
 
-The MVP uses preconfigured peer addresses, plaintext local networking, single-key
-operations, and leader-served point reads. Voters can change through joint
-consensus, but runtime address discovery is not included. It does not include
-transactions, distributed scans, authentication, or rolling upgrades.
+The MVP uses plaintext local networking, single-key operations, and leader-served
+point reads. Voters can change through joint consensus, while runtime address
+discovery uses an operator-managed JSON directory rather than an integrated
+registry. It does not include transactions, distributed scans, authentication,
+or rolling upgrades.
 Snapshot creation, durable publication, recovery, and transfer use disk-backed
 streams and ordered 1 MiB gRPC chunks. Production paths do not retain a complete
 image in memory; the development transport limits images to 64 GiB.
 
 ## Deferred Evolution
 
-Next: runtime peer-address discovery, optional stale follower reads,
-sharding/multi-Raft, TLS, and production operations. The local
+Next: optional stale follower reads, followed by sharding/multi-Raft, TLS, and
+production operations. The local
 Compose environment has an optional five-node profile for exercising membership
 changes; five-node production operations are still deferred.

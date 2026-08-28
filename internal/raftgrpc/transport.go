@@ -17,13 +17,28 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// Transport caches one gRPC connection per static peer.
+// Transport caches one gRPC connection per resolved peer address.
 type Transport struct {
 	mu               sync.Mutex
-	peers            map[uint64]string
+	resolver         PeerResolver
+	addresses        map[uint64]string
 	conns            map[uint64]*grpc.ClientConn
 	clients          map[uint64]lsmdbv1.RaftClient
 	snapshotInFlight map[uint64]bool
+}
+
+// PeerResolver maps a node ID to its current gRPC address.
+type PeerResolver interface {
+	Resolve(context.Context, uint64) (string, error)
+}
+
+type staticResolver map[uint64]string
+
+func (r staticResolver) Resolve(_ context.Context, id uint64) (string, error) {
+	if address := r[id]; id != 0 && address != "" {
+		return address, nil
+	}
+	return "", fmt.Errorf("unknown raft peer %d", id)
 }
 
 func New(peers map[uint64]string) *Transport {
@@ -31,7 +46,12 @@ func New(peers map[uint64]string) *Transport {
 	for id, address := range peers {
 		copy[id] = address
 	}
-	return &Transport{peers: copy, conns: make(map[uint64]*grpc.ClientConn), clients: make(map[uint64]lsmdbv1.RaftClient), snapshotInFlight: make(map[uint64]bool)}
+	return NewWithResolver(staticResolver(copy))
+}
+
+// NewWithResolver creates a transport whose addresses may change at runtime.
+func NewWithResolver(resolver PeerResolver) *Transport {
+	return &Transport{resolver: resolver, addresses: make(map[uint64]string), conns: make(map[uint64]*grpc.ClientConn), clients: make(map[uint64]lsmdbv1.RaftClient), snapshotInFlight: make(map[uint64]bool)}
 }
 
 func (t *Transport) Send(ctx context.Context, message raft.Message) error {
@@ -42,7 +62,7 @@ func (t *Transport) Send(ctx context.Context, message raft.Message) error {
 		data := message.Snapshot.Data
 		return t.SendSnapshot(ctx, message, bytes.NewReader(data), uint64(len(data)), crc32.ChecksumIEEE(data))
 	}
-	client, err := t.client(message.To)
+	client, err := t.client(ctx, message.To)
 	if err != nil {
 		return err
 	}
@@ -56,7 +76,7 @@ func (t *Transport) SendSnapshot(ctx context.Context, message raft.Message, read
 		return nil
 	}
 	defer t.endSnapshot(message.To)
-	client, err := t.client(message.To)
+	client, err := t.client(ctx, message.To)
 	if err != nil {
 		return err
 	}
@@ -137,19 +157,32 @@ func (t *Transport) Close() error {
 	}
 	t.conns = make(map[uint64]*grpc.ClientConn)
 	t.clients = make(map[uint64]lsmdbv1.RaftClient)
+	t.addresses = make(map[uint64]string)
 	t.snapshotInFlight = make(map[uint64]bool)
 	return first
 }
 
-func (t *Transport) client(id uint64) (lsmdbv1.RaftClient, error) {
+func (t *Transport) client(ctx context.Context, id uint64) (lsmdbv1.RaftClient, error) {
+	if t.resolver == nil {
+		return nil, errors.New("raft transport has no peer resolver")
+	}
+	address, err := t.resolver.Resolve(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("resolve raft peer %d: %w", id, err)
+	}
+	if address == "" {
+		return nil, fmt.Errorf("resolve raft peer %d: empty address", id)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if client := t.clients[id]; client != nil {
+	if client := t.clients[id]; client != nil && t.addresses[id] == address {
 		return client, nil
 	}
-	address, ok := t.peers[id]
-	if !ok || address == "" {
-		return nil, fmt.Errorf("unknown raft peer %d", id)
+	if connection := t.conns[id]; connection != nil {
+		_ = connection.Close()
+		delete(t.conns, id)
+		delete(t.clients, id)
+		delete(t.addresses, id)
 	}
 	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -158,6 +191,7 @@ func (t *Transport) client(id uint64) (lsmdbv1.RaftClient, error) {
 	client := lsmdbv1.NewRaftClient(connection)
 	t.conns[id] = connection
 	t.clients[id] = client
+	t.addresses[id] = address
 	return client, nil
 }
 

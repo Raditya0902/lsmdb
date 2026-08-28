@@ -4,7 +4,7 @@ Last updated: 2026-08-27
 
 ## Current Phase
 
-Disk-streamed snapshots beyond the former in-memory image limit are complete and verified.
+Runtime peer-address discovery is complete and verified.
 
 ## Completed
 
@@ -55,10 +55,15 @@ Disk-streamed snapshots beyond the former in-memory image limit are complete and
 - [x] Stream outbound and receive-side gRPC snapshot data through bounded buffers.
 - [x] Keep production snapshot bytes out of the deterministic Raft module.
 - [x] Validate a 257 MiB stream with a 1 MiB buffer and a 64 GiB safety ceiling.
+- [x] Add a peer-directory interface with static and refreshable file adapters.
+- [x] Rotate cached gRPC connections when a resolved address changes.
+- [x] Resolve addresses for startup voters, membership changes, status, and leader hints.
+- [x] Add a node CLI option and documented atomic-update workflow.
+- [x] Test adding a voter whose address was not statically preconfigured.
 
 ## In Progress
 
-(none)
+None.
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -163,12 +168,19 @@ Disk-streamed snapshots beyond the former in-memory image limit are complete and
 - 2026-08-27 — post-disk-streaming `go vet ./...` — PASS.
 - 2026-08-27 — post-disk-streaming default and five-node Compose configuration — PASS.
 - 2026-08-27 — post-disk-streaming `./scripts/docker-smoke.sh` — PASS.
+- 2026-08-27 — peer-directory refresh and gRPC connection-rotation tests — PASS.
+- 2026-08-27 — discovered four-node membership expansion, five consecutive runs — PASS.
+- 2026-08-27 — post-discovery `go test ./...` — PASS.
+- 2026-08-27 — post-discovery `go test -race ./...` — PASS.
+- 2026-08-27 — post-discovery `go vet ./...` — PASS.
+- 2026-08-27 — post-discovery default and five-node Compose configuration — PASS.
+- 2026-08-27 — post-discovery `./scripts/docker-smoke.sh` — PASS.
 
 ## Blockers
 
-None. Candidate addresses must be preconfigured in every peer map; membership
-changes replicate voter IDs but do not distribute addresses.
+None. Runtime discovery is an operator-managed JSON directory; an integrated,
+authenticated registry remains deferred.
 
 ## Next Task
 
-Design runtime peer-address discovery without weakening replicated voter membership.
+Design optional stale follower reads without weakening linearizable reads by default.

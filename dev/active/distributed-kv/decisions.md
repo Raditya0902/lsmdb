@@ -93,6 +93,17 @@ remain supported for deterministic core tests, but production paths must not
 materialize the complete image in memory. Snapshot streams have a 64 GiB safety
 limit; larger deployments require an explicitly revised operational limit.
 
+### D015 — Peer addresses resolve outside replicated membership
+
+Raft continues replicating voter IDs only. The cluster module resolves each ID
+through a small peer-directory interface before transport use, membership
+validation, status reporting, or leader hints. Static maps remain the default
+adapter. An optional atomically replaced JSON directory is refreshed at runtime;
+it overrides static entries and retains the last valid snapshot across transient
+read or parse failures. The gRPC transport closes and recreates a cached
+connection when an ID resolves to a different address. Address changes therefore
+cannot add voters, change quorum arithmetic, or become committed state.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

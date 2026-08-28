@@ -41,6 +41,9 @@ buildable and tested.
     snapshot publication, recovery, and gRPC transfer without retaining a full
     image in memory. Preserve deterministic byte-backed core tests and validate
     staged receive data before consensus delivery.
+12. **Runtime peer-address discovery** — resolve peer IDs through static or
+    refreshable file-backed directories, rotate gRPC connections when addresses
+    change, and keep voter membership exclusively in replicated Raft state.
 
 ## Network Interface
 
@@ -72,7 +75,6 @@ Followers return a typed leader hint. Keys are at most 16 KiB and values at most
 
 ## Deferred
 
-Five-node production deployment, runtime peer-address discovery, distributed
-scans, stale follower reads, sharding/multi-Raft, TLS, authentication, and
-rolling upgrades follow the MVP. A local five-node Compose profile is included
-for membership-operation exercises.
+Five-node production deployment, distributed scans, stale follower reads,
+sharding/multi-Raft, TLS, authentication, and rolling upgrades follow the MVP. A
+local five-node Compose profile is included for membership-operation exercises.

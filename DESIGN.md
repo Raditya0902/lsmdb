@@ -377,8 +377,11 @@ final entry but steps down as soon as it commits.
 The active configuration is reconstructed from the immutable bootstrap voters,
 the latest snapshot membership metadata, and the retained log suffix. This makes
 uncommitted configuration entries survive restart and ensures conflict truncation
-also rolls membership back. Candidate addresses are preconfigured in the
-transport adapter; consensus replicates IDs only.
+also rolls membership back. Consensus replicates IDs only. A peer-directory
+interface resolves those IDs independently through static mappings or a
+refreshable operator-managed JSON file. The gRPC adapter re-resolves before use
+and rotates a cached connection if the address changes, without changing any
+membership state.
 
 ### Write and read guarantees
 
@@ -409,6 +412,6 @@ linearizable read.
 - **Snapshot size ceiling.** Creation, durable recovery, and transfer are
   disk-streamed, but the development transport rejects images larger than
   64 GiB.
-- **Preconfigured peer addresses and plaintext transport.** Membership can
-  change, but runtime address discovery, TLS, authentication, and rolling upgrades
-  are deferred.
+- **Operator-managed discovery and plaintext transport.** A refreshable JSON
+  directory supports runtime address changes, but an integrated registry, TLS,
+  authentication, and rolling upgrades are deferred.

@@ -87,9 +87,10 @@ The network interface supports `Put`, `Delete`, linearizable `Get`, and
 retries with the same client ID/request sequence, preventing a delayed retry
 from reapplying an older write after failover.
 
-Membership changes use Raft joint consensus. Every candidate node address must
-already be present in each node's `-peers` map; use `-voters=1,2,3` to distinguish
-the bootstrap voter set from preconfigured non-voters.
+Membership changes use Raft joint consensus. Every candidate node ID must resolve
+through either `-peers` or `-peer-file` before the change begins; use
+`-voters=1,2,3` to distinguish the bootstrap voter set from non-voters that are
+only addressable.
 
 The optional Compose profile starts nodes 4 and 5 with all five addresses
 preconfigured, but leaves the replicated voter set at nodes 1–3:
@@ -121,6 +122,27 @@ Membership is durable in the Raft log and snapshots. Restarting containers does
 not reapply `-voters`; that flag is only the bootstrap configuration for fresh
 data directories. Use `docker compose down -v` only when intentionally deleting
 the cluster and starting again from voters 1–3.
+
+Peer addresses can be discovered at runtime from an operator-managed JSON file:
+
+```json
+{
+  "1": "node1:7001",
+  "2": "node2:7002",
+  "3": "node3:7003"
+}
+```
+
+Start each node with `-peer-file=/config/peers.json`; `-peer-refresh` controls the
+minimum reload interval and defaults to one second. Static `-peers` entries remain
+available as bootstrap fallbacks, while valid file entries take precedence. To
+change an address or introduce a candidate, write a complete new file and rename
+it atomically over the configured path. Add a candidate address before submitting
+`members`, and remove its address only after every remaining node reports the
+final voter set. Invalid or temporarily unreadable updates retain the last valid
+directory. Address discovery changes routing only—it never changes Raft voters or
+quorum requirements. A file-only startup must pass `-voters` explicitly and the
+directory must include the local node and every bootstrap voter.
 
 Nodes snapshot every 1,000 applied entries by default. Override this for local
 testing with `lsmdb-node -snapshot-threshold=N`. `Status` and Prometheus expose
@@ -262,9 +284,9 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
 - **No fsync per WAL append.** Only `Close()` fsyncs the WAL. Writes between the last flush and a power failure can be lost.
-- **Preconfigured peer addresses.** Voter membership is dynamic, but node
-  addresses must already exist in every process's peer map; runtime address
-  discovery is not implemented.
+- **Operator-managed peer discovery.** Runtime JSON directories can add or
+  change addresses without restarting nodes, but there is no integrated service
+  registry or authenticated address distribution.
 - **Snapshot size ceiling.** Snapshot images stream through disk and ordered
   1 MiB gRPC chunks instead of a full-image allocation, but the development
   transport rejects images larger than 64 GiB.

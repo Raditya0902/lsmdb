@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"lsmdb/cluster"
 )
@@ -19,6 +20,8 @@ func main() {
 	metrics := flag.String("metrics", "", "Prometheus/health HTTP listen address")
 	dataDir := flag.String("data-dir", "", "persistent node data directory")
 	peerList := flag.String("peers", "", "comma-separated static peers: 1=host:port,2=host:port")
+	peerFile := flag.String("peer-file", "", "optional JSON peer directory reloaded at runtime")
+	peerRefresh := flag.Duration("peer-refresh", time.Second, "minimum interval between peer-directory reloads")
 	voterList := flag.String("voters", "", "comma-separated bootstrap voter IDs; defaults to every configured peer")
 	snapshotThreshold := flag.Uint64("snapshot-threshold", 1000, "applied entries between Raft snapshots (0 uses default)")
 	flag.Parse()
@@ -31,9 +34,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var resolver cluster.PeerResolver
+	if strings.TrimSpace(*peerFile) != "" {
+		resolver, err = cluster.NewFilePeerResolver(*peerFile, *peerRefresh)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	node, err := cluster.StartNode(cluster.NodeConfig{
 		ID: *id, ListenAddress: *listen, MetricsAddress: *metrics,
-		DataDir: *dataDir, Peers: peers, Voters: voters, SnapshotThreshold: *snapshotThreshold,
+		DataDir: *dataDir, Peers: peers, PeerResolver: resolver, Voters: voters, SnapshotThreshold: *snapshotThreshold,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -71,6 +81,9 @@ func parseVoters(value string) ([]uint64, error) {
 
 func parsePeers(value string) (map[uint64]string, error) {
 	peers := make(map[uint64]string)
+	if strings.TrimSpace(value) == "" {
+		return peers, nil
+	}
 	for _, item := range strings.Split(value, ",") {
 		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
 		if len(parts) != 2 || parts[1] == "" {

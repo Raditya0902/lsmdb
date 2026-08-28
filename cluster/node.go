@@ -27,13 +27,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// NodeConfig configures one member of a static cluster.
+// NodeConfig configures one member of a Raft cluster.
 type NodeConfig struct {
 	ID                uint64
 	ListenAddress     string
 	MetricsAddress    string
 	DataDir           string
 	Peers             map[uint64]string
+	PeerResolver      PeerResolver
 	Voters            []uint64
 	TickInterval      time.Duration
 	ElectionTickMin   int
@@ -75,13 +76,13 @@ func (c NodeConfig) validate() error {
 	if c.ID == 0 || c.ListenAddress == "" || c.DataDir == "" {
 		return errors.New("node ID, listen address, and data directory are required")
 	}
-	if len(c.Peers) == 0 || c.Peers[c.ID] == "" {
-		return errors.New("static peers must contain the local node")
+	if len(c.Peers) == 0 && c.PeerResolver == nil {
+		return errors.New("static peers or a peer resolver are required")
 	}
 	seen := make(map[uint64]struct{}, len(c.Voters))
 	for _, id := range c.Voters {
-		if id == 0 || c.Peers[id] == "" {
-			return fmt.Errorf("initial voter %d is not in the peer map", id)
+		if id == 0 {
+			return errors.New("initial voter IDs must be positive")
 		}
 		if _, ok := seen[id]; ok {
 			return fmt.Errorf("duplicate initial voter %d", id)
@@ -100,6 +101,7 @@ type Node struct {
 	runtime       *raftnode.Runtime
 	machine       *kvstate.Machine
 	transport     *raftgrpc.Transport
+	peerResolver  PeerResolver
 	metrics       *nodeMetrics
 	metricsServer *http.Server
 	metricsCancel context.CancelFunc
@@ -117,6 +119,14 @@ func StartNode(config NodeConfig) (*Node, error) {
 	}
 	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create node data dir: %w", err)
+	}
+	resolver := fallbackPeerResolver{primary: config.PeerResolver, fallback: newStaticPeerResolver(config.Peers)}
+	resolveContext, cancelResolve := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelResolve()
+	for _, id := range append(append([]uint64(nil), config.Voters...), config.ID) {
+		if _, err := resolver.Resolve(resolveContext, id); err != nil {
+			return nil, fmt.Errorf("resolve startup peer %d: %w", id, err)
+		}
 	}
 	machine, err := kvstate.Open(filepath.Join(config.DataDir, "state"), config.DBOptions)
 	if err != nil {
@@ -166,7 +176,7 @@ func StartNode(config NodeConfig) (*Node, error) {
 		_ = machine.Close()
 		return nil, fmt.Errorf("listen on %s: %w", config.ListenAddress, err)
 	}
-	transport := raftgrpc.New(config.Peers)
+	transport := raftgrpc.NewWithResolver(resolver)
 	metrics := newNodeMetrics(config.ID)
 	observed := &observedTransport{inner: transport, metrics: metrics}
 	runtime, err := raftnode.Start(
@@ -180,7 +190,7 @@ func StartNode(config NodeConfig) (*Node, error) {
 		return nil, err
 	}
 	node := &Node{
-		config: config, runtime: runtime, machine: machine, transport: transport,
+		config: config, runtime: runtime, machine: machine, transport: transport, peerResolver: resolver,
 		metrics: metrics,
 		server: grpc.NewServer(
 			grpc.UnaryInterceptor(metrics.unaryInterceptor),
@@ -208,6 +218,10 @@ func (n *Node) Address() string { return n.listener.Addr().String() }
 
 // Status returns the local Raft status.
 func (n *Node) Status(ctx context.Context) (raft.Status, error) { return n.runtime.Status(ctx) }
+
+func (n *Node) peerAddress(ctx context.Context, id uint64) (string, error) {
+	return n.peerResolver.Resolve(ctx, id)
+}
 
 // Close stops network traffic and closes durable state.
 func (n *Node) Close() error {
@@ -321,8 +335,16 @@ func (h *handler) Status(ctx context.Context, _ *lsmdbv1.StatusRequest) (*lsmdbv
 	if err != nil {
 		return nil, h.node.rpcError(err)
 	}
-	peers := make([]*lsmdbv1.Peer, 0, len(h.node.config.Peers))
-	for id, address := range h.node.config.Peers {
+	peerIDs := make(map[uint64]struct{}, len(h.node.config.Peers)+len(current.Membership.Voters)+len(current.Membership.JointVoters))
+	for id := range h.node.config.Peers {
+		peerIDs[id] = struct{}{}
+	}
+	for _, id := range append(append([]uint64(nil), current.Membership.Voters...), current.Membership.JointVoters...) {
+		peerIDs[id] = struct{}{}
+	}
+	peers := make([]*lsmdbv1.Peer, 0, len(peerIDs))
+	for id := range peerIDs {
+		address, _ := h.node.peerAddress(ctx, id)
 		peers = append(peers, &lsmdbv1.Peer{Id: id, Address: address})
 	}
 	sort.Slice(peers, func(i, j int) bool { return peers[i].Id < peers[j].Id })
@@ -341,8 +363,8 @@ func (h *handler) ChangeMembership(ctx context.Context, request *lsmdbv1.ChangeM
 	}
 	seen := make(map[uint64]struct{}, len(request.VoterIds))
 	for _, id := range request.VoterIds {
-		if h.node.config.Peers[id] == "" {
-			return nil, status.Errorf(codes.InvalidArgument, "voter %d is not in the configured peer map", id)
+		if _, err := h.node.peerAddress(ctx, id); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "resolve voter %d: %v", id, err)
 		}
 		if _, ok := seen[id]; ok {
 			return nil, status.Errorf(codes.InvalidArgument, "duplicate voter %d", id)
@@ -415,7 +437,10 @@ func (h *handler) handleRaftMessage(ctx context.Context, request *lsmdbv1.RaftMe
 func (n *Node) rpcError(err error) error {
 	if errors.Is(err, raft.ErrNotLeader) {
 		current, _ := n.runtime.Status(context.Background())
-		detail := &lsmdbv1.NotLeader{LeaderId: current.LeaderID, LeaderAddress: n.config.Peers[current.LeaderID]}
+		resolveContext, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		leaderAddress, _ := n.peerAddress(resolveContext, current.LeaderID)
+		cancel()
+		detail := &lsmdbv1.NotLeader{LeaderId: current.LeaderID, LeaderAddress: leaderAddress}
 		base := status.New(codes.FailedPrecondition, "node is not the Raft leader")
 		withDetail, detailErr := base.WithDetails(detail)
 		if detailErr == nil {

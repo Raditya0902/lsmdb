@@ -46,12 +46,14 @@ opts := &db.Options{
 
 ## Distributed Raft cluster
 
-The repository also includes a statically addressed three-node database that
-uses the LSM engine as a replicated state machine. It implements Raft pre-vote,
-leader election, heartbeats, quorum replication, conflict repair, quorum-loss
-stepdown, persistent hard state/log recovery, retry deduplication, and
-ReadIndex-style linearizable point reads. Durable logical snapshots bound the
-retained Raft log and recover followers that fall behind the compacted prefix.
+The repository also includes a three-node database, with an optional five-node
+profile, that uses the LSM engine as a replicated state machine. Peers resolve
+through static maps or a refreshable runtime directory. The cluster implements
+Raft pre-vote, leader election, heartbeats, quorum replication, conflict repair,
+quorum-loss stepdown, persistent hard state/log recovery, retry deduplication,
+and ReadIndex-style linearizable point reads. Durable logical snapshots bound
+the retained Raft log and recover followers that fall behind the compacted
+prefix.
 
 ```text
 Client → gRPC leader → durable Raft majority → committed log index
@@ -154,18 +156,40 @@ development transport accepts images up to 64 GiB.
 
 `go run ./cmd/clusterbench` starts a fresh local three-node cluster, measures
 replicated writes, stops the leader, and records time until a write succeeds
-through the new majority leader.
+through the new majority leader. `-concurrency=N` uses N independent clients;
+each client preserves its own retry identity and request sequence.
 
-```text
-Environment: Apple arm64, macOS, Go 1.26.1, loopback gRPC, 1,000 × 128-byte writes
-Throughput:  98.0 committed writes/sec
-Latency:     P50 10.79 ms, P95 13.35 ms, P99 16.23 ms
-Failover:    113.77 ms
-Failures:    0
+The following results are medians from five fresh-cluster runs per profile on
+2026-08-27. The environment was an Apple M4 with 16 GiB RAM, macOS 26.5.2,
+Go 1.26.1, loopback gRPC, local temporary directories, and 1,000 × 128-byte
+writes per run.
+
+| Profile | Throughput, median (range) | P50 | P95 | P99 | Failover, median (range) |
+|---|---:|---:|---:|---:|---:|
+| 1 client | 89.6 ops/s (88.1–91.8) | 11.26 ms | 16.06 ms | 17.26 ms | 296.42 ms (195.93–440.14) |
+| 4 clients | 28.6 ops/s (22.0–31.3) | 86.99 ms | 374.26 ms | 426.66 ms | 284.41 ms (234.76–292.81) |
+
+All 10 runs committed every measured write and completed the post-failure write.
+Throughput covers the write workload before leader termination; failover is a
+separate measurement. The four-client result shows that this implementation
+does not scale concurrent writes: the single Raft event loop and per-update
+durable syncs have no group-commit path, so queued writes increase disk sync and
+tail-latency pressure. These are local development results, not production
+capacity.
+
+Reproduce each profile with:
+
+```bash
+for run in 1 2 3 4 5; do
+  go run ./cmd/clusterbench -operations=1000 -value-size=128 -concurrency=1
+done
+
+for run in 1 2 3 4 5; do
+  go run ./cmd/clusterbench -operations=1000 -value-size=128 -concurrency=4
+done
 ```
 
-These are local development results from 2026-08-26, not production capacity.
-Run the command on the target machine before using the numbers in a resume.
+Run the commands on the target machine before using the numbers in a résumé.
 
 ---
 

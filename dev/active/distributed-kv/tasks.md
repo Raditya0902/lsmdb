@@ -4,7 +4,7 @@ Last updated: 2026-08-27
 
 ## Current Phase
 
-Runtime peer-address discovery is complete and verified.
+The v1.0.0 release is complete and verified.
 
 ## Completed
 
@@ -60,6 +60,9 @@ Runtime peer-address discovery is complete and verified.
 - [x] Resolve addresses for startup voters, membership changes, status, and leader hints.
 - [x] Add a node CLI option and documented atomic-update workflow.
 - [x] Test adding a voter whose address was not statically preconfigured.
+- [x] Add independent-client concurrency and isolated deadlines to the cluster benchmark.
+- [x] Record five-run serial and four-client benchmark medians and ranges.
+- [x] Refresh the public benchmark environment, results, limitations, and discovery wording.
 
 ## In Progress
 
@@ -175,6 +178,14 @@ None.
 - 2026-08-27 — post-discovery `go vet ./...` — PASS.
 - 2026-08-27 — post-discovery default and five-node Compose configuration — PASS.
 - 2026-08-27 — post-discovery `./scripts/docker-smoke.sh` — PASS.
+- 2026-08-27 — five fresh serial cluster-benchmark runs; median 89.6 ops/sec, P99 17.26 ms, failover 296.42 ms, zero failures — PASS.
+- 2026-08-27 — five fresh four-client cluster-benchmark runs; median 28.6 ops/sec, P99 426.66 ms, failover 284.41 ms, zero failures — PASS.
+- 2026-08-27 — race-instrumented four-client benchmark run — PASS.
+- 2026-08-27 — v1.0.0 `go test ./...` — PASS.
+- 2026-08-27 — v1.0.0 `go test -race ./...` — PASS.
+- 2026-08-27 — v1.0.0 `go vet ./...` — PASS.
+- 2026-08-27 — v1.0.0 default and five-node Compose configuration — PASS.
+- 2026-08-27 — v1.0.0 `./scripts/docker-smoke.sh` — PASS.
 
 ## Blockers
 
@@ -183,4 +194,4 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Design optional stale follower reads without weakening linearizable reads by default.
+None for v1.0.0. Optional stale follower reads remain deferred.

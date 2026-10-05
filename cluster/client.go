@@ -23,6 +23,7 @@ type Client struct {
 	addresses []string
 	clientID  string
 	sequence  atomic.Uint64
+	attempts  atomic.Uint64
 	writeMu   sync.Mutex
 	mu        sync.Mutex
 	conns     map[string]*grpc.ClientConn
@@ -120,6 +121,10 @@ func (c *Client) ChangeMembership(ctx context.Context, voters []uint64) (*lsmdbv
 	return response, err
 }
 
+// Attempts reports how many RPC attempts this client has issued, including
+// retries. It is diagnostic only and never affects request handling.
+func (c *Client) Attempts() uint64 { return c.attempts.Load() }
+
 // Close releases cached gRPC connections.
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -148,6 +153,7 @@ func (c *Client) retry(ctx context.Context, call func(lsmdbv1.KVClient) error) e
 			last = err
 			continue
 		}
+		c.attempts.Add(1)
 		if err := call(client); err == nil {
 			c.setLeader(address)
 			return nil

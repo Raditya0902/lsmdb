@@ -84,6 +84,27 @@ Check before starting:
 
 ## 3. Official cluster comparison
 
+### Official protocol
+
+Every official cluster number uses exactly this protocol. A run with any other
+setting is not official, even on Linux with `-official`.
+
+| Setting | Value |
+|---|---|
+| Warmup | `-warmup 5s` |
+| Measurement window | `-duration 30s` |
+| Repetitions | `-repetitions 5`, each on a fresh cluster |
+| Arm order | interleaved through `scripts/bench_compare.go`; the first arm rotates every repetition |
+
+Never compare runs that used different `-duration` values. Counter ratios and
+throughput both drift with how long the cluster has been running (section 5), so a
+change in window length alone changes the numbers.
+
+The failover run (3c) is a single-arm run, so it is not interleaved. It uses the same
+warmup, window and repetition count.
+
+### Arms
+
 The arms are defined by role. The SHAs are correct for the branch as committed; if
 the branch is rebased, substitute the new SHAs for the same roles.
 
@@ -168,19 +189,32 @@ min–max ranges, not single medians.
 
 **Validity.** A cluster run is invalid if any node's term changed during the
 measurement window, which means an election happened while it was being measured.
-Invalid runs are counted but excluded from every statistic. If any cell has more
-than one invalid run, find the cause and rerun the whole comparison.
+Invalid runs are counted but excluded from every statistic. An invalid run leaves
+its cell with fewer than 5 valid runs, so the summary prints `insufficient runs` for
+it. Find the cause and rerun the whole comparison.
 
-**Meaningful differences.** A difference is meaningful only when the two arms'
-min–max ranges over valid runs are disjoint.
+**Meaningful differences.** A difference is meaningful only when both arms have at
+least 5 valid runs and their min–max ranges over valid runs are disjoint. With
+fewer than 5 valid runs on either arm, the summary prints `insufficient runs`
+instead of a verdict.
 
 At 5 runs per arm, two identical distributions produce disjoint ranges by chance
-2 / C(10,5) ≈ 0.8% of the time. At 3 runs per arm the chance is 2 / C(6,3) = 10%,
-so do not draw conclusions from 3-run comparisons.
+2 / C(10,5) ≈ 0.8% of the time. At 3 runs per arm the chance is 2 / C(6,3) = 10%.
 
-**Counter ratios.** Report the counter ratios together with the window length.
-AppendEntries per committed entry grows with how long the cluster has been
-running, so ratios from different `-duration` values are not comparable.
+**Counter ratios and throughput depend on window length.** Both are comparable only
+between runs with the same `-duration`, and every report must state its window
+length. Duplicate-ack AppendEntries traffic keeps growing while the cluster runs,
+even at 1 client. Secondary smoke runs on an Apple M4 (macOS) at 1 client measured:
+
+| Window | AppendEntries per committed entry | Throughput |
+|---|---:|---:|
+| 3 s (1 run) | 12.6 | 89.9 ops/s |
+| 10 s (11 runs, min–max) | 33.0–70.4 | 89.6–92.6 ops/s |
+| 20 s (1 run) | 112 | 78.9 ops/s |
+
+The 3 s and 20 s rows are single runs, so the throughput decay between them is an
+indication, not a measured effect. This growth means duplicate-ack chains do not die
+out between writes at 1 client, as was previously assumed.
 
 **Archiving.** Keep together:
 - the compare JSON files;

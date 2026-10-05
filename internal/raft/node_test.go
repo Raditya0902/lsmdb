@@ -159,6 +159,52 @@ func TestFollowerNeverTruncatesCommittedEntry(t *testing.T) {
 	}
 }
 
+func TestFollowerDoesNotCommitUnverifiedStaleSuffix(t *testing.T) {
+	// Entry 3 is a stale suffix from an older leader; the current leader has only
+	// proved that the log matches through index 2.
+	node, err := New(testConfig(2), HardState{Term: 2}, []Entry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+		{Index: 3, Term: 1, Data: []byte("stale")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := node.Step(Message{
+		Type: MsgAppend, From: 1, To: 2, Term: 2, LogIndex: 2, LogTerm: 1, LeaderCommit: 3,
+	})
+	if got := node.Status().CommitIndex; got != 2 {
+		t.Fatalf("commit = %d, want 2", got)
+	}
+	for _, entry := range update.Committed {
+		if entry.Index > 2 {
+			t.Fatalf("committed unverified entry %d (%q)", entry.Index, entry.Data)
+		}
+	}
+}
+
+func TestFollowerCommitNeverMovesBackwardOnDelayedAppend(t *testing.T) {
+	node, err := New(testConfig(2), HardState{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []Entry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
+	node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 1, Entries: entries, LeaderCommit: 2})
+	if got := node.Status().CommitIndex; got != 2 {
+		t.Fatalf("commit after newer append = %d, want 2", got)
+	}
+	// A delayed append verifies only index 1 but carries a higher leader commit.
+	delayed := node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 1, Entries: entries[:1], LeaderCommit: 3})
+	if got := node.Status().CommitIndex; got < 2 {
+		t.Fatalf("commit moved backward to %d", got)
+	}
+	for _, entry := range delayed.Committed {
+		if entry.Index <= 2 {
+			t.Fatalf("re-emitted committed entry %d", entry.Index)
+		}
+	}
+}
+
 func TestFollowerRejectsMalformedMembershipWithoutMutatingLog(t *testing.T) {
 	node, err := New(testConfig(2), HardState{Term: 2}, nil)
 	if err != nil {

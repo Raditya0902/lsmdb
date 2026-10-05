@@ -510,13 +510,15 @@ func (n *Node) handleAppend(message Message) Update {
 		return update
 	}
 
+	// LogIndex is the previous index, so lastNew is the last entry this message proved.
 	lastNew := message.LogIndex + uint64(len(message.Entries))
 	if lastNew > n.lastIndex() {
 		lastNew = n.lastIndex()
 	}
-	if message.LeaderCommit > n.commit {
+	// Entries beyond lastNew may be a stale suffix; a delayed append must not move commit backward.
+	if commit := min(message.LeaderCommit, lastNew); commit > n.commit {
 		old := n.commit
-		n.commit = min(message.LeaderCommit, n.lastIndex())
+		n.commit = commit
 		update.Committed = append(update.Committed, n.entriesBetween(old+1, n.commit+1)...)
 	}
 	update.Messages = append(update.Messages, Message{

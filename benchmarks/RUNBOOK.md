@@ -225,6 +225,27 @@ The 3 s and 20 s rows are single runs, so the throughput decay between them is a
 indication, not a measured effect. This growth means duplicate-ack chains do not die
 out between writes at 1 client, as was previously assumed.
 
+**Checking a result file.** Before quoting any number, run the checker on the
+compare file (or on a single clusterbench report, with at most one `-expect`):
+
+```bash
+go run scripts/vm_smoke_check.go -expect base=bd67696+ed0e92e,8eae967 -expect tip=8eae967 \
+  benchmarks/results/<file>-compare.json
+```
+
+The checker prints PASS, FAIL, WARN or SKIP for each of these:
+- Linux, the CPU count, and the data dir's filesystem and mount options;
+- no hostname, username, home path or IP address anywhere in the file;
+- `fsync(2)`, with fsync p50 and p99 before and after every run;
+- the machine and disk labels;
+- the expected arms and SHAs;
+- no run invalidated by an election;
+- the protocol, which warns when it is not 5 s / 30 s / 5.
+
+It then prints a table of every run, and exits 1 if any check failed. It searches
+for the hostname and username of the machine it runs on. To check a VM's file
+elsewhere, add `-forbid <vm-hostname> -forbid <vm-user>`.
+
 **Archiving.** Keep together:
 - the compare JSON files;
 - the embedded JSON;

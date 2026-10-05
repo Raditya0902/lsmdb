@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "complete": true,
+  "clients": [
+    1
+  ],
+  "repetitions": 1,
+  "clusterbench_args": [
+    "-warmup",
+    "5s",
+    "-duration",
+    "10s",
+    "-data-dir",
+    "/mnt/bench"
+  ],
+  "disk_type": "local NVMe SSD",
+  "arms": [
+    {
+      "name": "base",
+      "rev": "bd67696",
+      "picks": [
+        "ed0e92e",
+        "8eae967"
+      ],
+      "base_sha": "bd67696c28d50e46ca26d836cf529eb47f8a2e8c",
+      "head_sha": "5c0ffee5c0ffee5c0ffee5c0ffee5c0ffee5c0ff",
+      "picked_shas": [
+        "1111111111111111111111111111111111111111",
+        "5c0ffee5c0ffee5c0ffee5c0ffee5c0ffee5c0ff"
+      ]
+    },
+    {
+      "name": "tip",
+      "rev": "8eae967",
+      "base_sha": "8eae9673cdcbabf36f8bd4ec40fb7ea6ad8f632a",
+      "head_sha": "8eae9673cdcbabf36f8bd4ec40fb7ea6ad8f632a"
+    }
+  ],
+  "runs": [
+    {
+      "sequence": 1,
+      "repetition": 1,
+      "clients": 1,
+      "arm": "base",
+      "report": {
+        "schema_version": 1,
+        "label": "secondary",
+        "environment": {
+          "git_sha": "5c0ffee5c0ffee5c0ffee5c0ffee5c0ffee5c0ff",
+          "git_dirty": false,
+          "go_version": "go1.26.1",
+          "goos": "linux",
+          "goarch": "amd64",
+          "kernel": "6.8.0-1015-gcp",
+          "cpu_model": "Intel(R) Xeon(R) CPU @ 2.80GHz",
+          "ram_bytes": 33654456320,
+          "gomaxprocs": 8,
+          "fsync_primitive": "fsync(2)",
+          "filesystem": "ext4",
+          "mount_options": "rw,relatime,rw,discard,errors=remount-ro",
+          "block_device": "nvme0n1 rotational=0 model=nvme_card"
+        },
+        "config": {
+          "mode": "throughput",
+          "clients": [
+            1
+          ],
+          "warmup_seconds": 5,
+          "duration_seconds": 10,
+          "repetitions": 1,
+          "snapshot_threshold": 1000000,
+          "tick_ms": 20,
+          "election_tick_min": 5,
+          "election_tick_max": 10,
+          "heartbeat_ticks": 1,
+          "check_quorum_ticks": 5,
+          "nodes": 3,
+          "seed": 1,
+          "seed_scope": "workload key sequence only",
+          "value_size": 128,
+          "fsync_probe_samples": 200,
+          "official": false
+        },
+        "runs": [
+          {
+            "repetition": 1,
+            "clients": 1,
+            "valid": true,
+            "window_seconds": 10,
+            "ops_ok": 4125,
+            "ops_failed": 0,
+            "retries": 0,
+            "throughput_ops_per_sec": 412.5,
+            "latency_ms": {
+              "p50": 2.31,
+              "p95": 3.8960000000000004,
+              "p99": 4.87,
+              "p99_9": 5.844,
+              "max": 7.305
+            },
+            "terms_start": [
+              2,
+              2,
+              2
+            ],
+            "terms_end": [
+              2,
+              2,
+              2
+            ],
+            "elections_in_window": 0,
+            "committed_entries": 4125,
+            "fsync_before": {
+              "samples": 200,
+              "block_bytes": 4096,
+              "p50_ms": 0.61,
+              "p99_ms": 1.42
+            },
+            "fsync_after": {
+              "samples": 200,
+              "block_bytes": 4096,
+              "p50_ms": 0.63,
+              "p99_ms": 1.51
+            },
+            "counters": {
+              "log_syncs": 12375,
+              "log_sync_entries": 12375,
+              "hardstate_syncs": 12,
+              "append_messages_total": 145612.50000000003,
+              "log_syncs_per_committed_entry": 3.0,
+              "entries_per_log_sync": 1.0,
+              "append_messages_per_committed_entry": 35.300000000000004,
+              "append_messages_per_committed_entry_by_origin": {
+                "ack_resend": 30.1,
+                "commit_advance": 1.0,
+                "heartbeat": 2.2,
+                "proposal": 2.0
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "sequence": 2,
+      "repetition": 1,
+      "clients": 1,
+      "arm": "tip",
+      "report": {
+        "schema_version": 1,
+        "label": "secondary",
+        "environment": {
+          "git_sha": "8eae9673cdcbabf36f8bd4ec40fb7ea6ad8f632a",
+          "git_dirty": false,
+          "go_version": "go1.26.1",
+          "goos": "linux",
+          "goarch": "amd64",
+          "kernel": "6.8.0-1015-gcp",
+          "cpu_model": "Intel(R) Xeon(R) CPU @ 2.80GHz",
+          "ram_bytes": 33654456320,
+          "gomaxprocs": 8,
+          "fsync_primitive": "fsync(2)",
+          "filesystem": "ext4",
+          "mount_options": "rw,relatime,rw,discard,errors=remount-ro",
+          "block_device": "nvme0n1 rotational=0 model=nvme_card"
+        },
+        "config": {
+          "mode": "throughput",
+          "clients": [
+            1
+          ],
+          "warmup_seconds": 5,
+          "duration_seconds": 10,
+          "repetitions": 1,
+          "snapshot_threshold": 1000000,
+          "tick_ms": 20,
+          "election_tick_min": 5,
+          "election_tick_max": 10,
+          "heartbeat_ticks": 1,
+          "check_quorum_ticks": 5,
+          "nodes": 3,
+          "seed": 1,
+          "seed_scope": "workload key sequence only",
+          "value_size": 128,
+          "fsync_probe_samples": 200,
+          "official": false
+        },
+        "runs": [
+          {
+            "repetition": 1,
+            "clients": 1,
+            "valid": true,
+            "window_seconds": 10,
+            "ops_ok": 4059,
+            "ops_failed": 0,
+            "retries": 0,
+            "throughput_ops_per_sec": 405.9,
+            "latency_ms": {
+              "p50": 2.36,
+              "p95": 4.016,
+              "p99": 5.02,
+              "p99_9": 6.023999999999999,
+              "max": 7.529999999999999
+            },
+            "terms_start": [
+              2,
+              2,
+              2
+            ],
+            "terms_end": [
+              2,
+              2,
+              2
+            ],
+            "elections_in_window": 0,
+            "committed_entries": 4059,
+            "fsync_before": {
+              "samples": 200,
+              "block_bytes": 4096,
+              "p50_ms": 0.62,
+              "p99_ms": 1.47
+            },
+            "fsync_after": {
+              "samples": 200,
+              "block_bytes": 4096,
+              "p50_ms": 0.64,
+              "p99_ms": 1.55
+            },
+            "counters": {
+              "log_syncs": 12177,
+              "log_sync_entries": 12177,
+              "hardstate_syncs": 12,
+              "append_messages_total": 148965.3,
+              "log_syncs_per_committed_entry": 3.0,
+              "entries_per_log_sync": 1.0,
+              "append_messages_per_committed_entry": 36.699999999999996,
+              "append_messages_per_committed_entry_by_origin": {
+                "ack_resend": 31.4,
+                "commit_advance": 1.0,
+                "heartbeat": 2.3,
+                "proposal": 2.0
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

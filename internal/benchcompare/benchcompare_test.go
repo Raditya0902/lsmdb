@@ -363,3 +363,105 @@ func TestCombinedRecordsDriverCPUs(t *testing.T) {
 		}
 	}
 }
+
+// reportWithCounters builds a one-run secondary report with the given counters.
+func reportWithCounters(t *testing.T, clients int, throughput, p99 float64, counters map[string]any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"label": "secondary",
+		"runs": []map[string]any{{
+			"clients": clients, "valid": true, "throughput_ops_per_sec": throughput,
+			"latency_ms": map[string]float64{"p99": p99}, "counters": counters,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// fiveRunsPerArm gives base and fix five valid runs each at 4 clients.
+func fiveRunsPerArm(t *testing.T, base, fix func(rep int) map[string]any) Combined {
+	combined := Combined{Complete: true, Arms: []ArmBuild{{Arm: Arm{Name: "base"}}, {Arm: Arm{Name: "fix"}}}}
+	for rep := 1; rep <= 5; rep++ {
+		combined.Runs = append(combined.Runs,
+			ArmRun{Slot: Slot{Sequence: 2*rep - 1, Repetition: rep, Clients: 4, Arm: "base"}, Report: reportWithCounters(t, 4, 25, 680, base(rep))},
+			ArmRun{Slot: Slot{Sequence: 2 * rep, Repetition: rep, Clients: 4, Arm: "fix"}, Report: reportWithCounters(t, 4, 25, 680, fix(rep))})
+	}
+	return combined
+}
+
+func TestSummaryLeadsWithAppendsPerEntry(t *testing.T) {
+	combined := fiveRunsPerArm(t,
+		func(rep int) map[string]any {
+			return map[string]any{"append_messages_per_committed_entry": 140.0 + float64(rep)}
+		},
+		func(rep int) map[string]any {
+			return map[string]any{"append_messages_per_committed_entry": 4.0 + float64(rep)/10}
+		})
+	summary, err := Summarize(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmp := summary.Comparisons[0]
+	wantRatio := (4.0 + float64(3)/10) / (140.0 + 3)
+	if !cmp.AppendsMeaningful || cmp.AppendsRatio != wantRatio {
+		t.Fatalf("appends comparison = meaningful %v ratio %v, want disjoint ranges and %v", cmp.AppendsMeaningful, cmp.AppendsRatio, wantRatio)
+	}
+	if cmp.ThroughputMeaningful {
+		t.Fatalf("identical throughput was marked meaningful: %+v", cmp)
+	}
+	var text bytes.Buffer
+	if err := WriteSummary(&text, summary); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(text.String(), "\n")
+	header, verdictLine := lines[1], lines[len(lines)-2]
+	if a, o := strings.Index(header, "appends/entry"), strings.Index(header, "ops/s"); a < 0 || o < 0 || a > o {
+		t.Errorf("header does not lead with appends/entry: %q", header)
+	}
+	if !strings.Contains(header, "appends/entry median [min, max]") {
+		t.Errorf("header lacks the appends/entry range: %q", header)
+	}
+	if a, o := strings.Index(verdictLine, "appends/entry"), strings.Index(verdictLine, "throughput"); a < 0 || o < 0 || a > o {
+		t.Errorf("comparison line does not lead with appends/entry: %q", verdictLine)
+	}
+	if !strings.Contains(verdictLine, "appends/entry x0.030 meaningful") {
+		t.Errorf("comparison line lacks the appends verdict: %q", verdictLine)
+	}
+}
+
+func TestSummaryShowsSendFailuresOnlyWhereRecorded(t *testing.T) {
+	combined := fiveRunsPerArm(t,
+		func(int) map[string]any { return map[string]any{"append_messages_per_committed_entry": 140.0} },
+		func(rep int) map[string]any {
+			return map[string]any{"append_messages_per_committed_entry": 5.0,
+				"send_failures_deadline": float64(rep), "send_failures_other": 1.0}
+		})
+	summary, err := Summarize(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, fix := summary.Cells[0], summary.Cells[1]
+	if base.SendFailuresRecorded != 0 {
+		t.Errorf("base recorded send failures in %d runs, want 0: its reports predate the field", base.SendFailuresRecorded)
+	}
+	if fix.SendFailuresRecorded != 5 || fix.SendFailuresDeadline != (Range{Median: 3, Min: 1, Max: 5}) || fix.SendFailuresOther.Median != 1 {
+		t.Errorf("fix send failures = %d recorded, deadline %+v, other %+v", fix.SendFailuresRecorded, fix.SendFailuresDeadline, fix.SendFailuresOther)
+	}
+	var text bytes.Buffer
+	if err := WriteSummary(&text, summary); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(text.String(), "\n")
+	if !strings.Contains(lines[1], "deadline fails/run") || !strings.Contains(lines[1], "other fails/run") {
+		t.Fatalf("header lacks send failure columns: %q", lines[1])
+	}
+	baseFields, fixFields := strings.Fields(lines[2]), strings.Fields(lines[3])
+	if got := baseFields[len(baseFields)-2:]; got[0] != "-" || got[1] != "-" {
+		t.Errorf("base row send failures = %v, want - - when unrecorded: %q", got, lines[2])
+	}
+	if got := fixFields[len(fixFields)-2:]; got[0] != "3" || got[1] != "1" {
+		t.Errorf("fix row send failures = %v, want 3 1: %q", got, lines[3])
+	}
+}

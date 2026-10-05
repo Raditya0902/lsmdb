@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +39,26 @@ func TestCounterDeltasWithNothingCommittedStayEncodable(t *testing.T) {
 	}
 	if got.SyncsPerCommittedEntry != 0 || got.EntriesPerSync != 0 {
 		t.Fatalf("ratios without data = %+v, want zero", got)
+	}
+}
+
+func TestCounterDeltasCountSendFailuresInWindowOnly(t *testing.T) {
+	deadline := "lsmdb_raft_transport_send_failures_total{class=deadline}"
+	other := "lsmdb_raft_transport_send_failures_total{class=other}"
+	// Failures before the window started (warmup, elections) must not be counted.
+	before := []map[string]float64{{deadline: 40, other: 2}, {deadline: 0, other: 0}, {deadline: 5, other: 1}}
+	after := []map[string]float64{{deadline: 47, other: 2}, {deadline: 3, other: 0}, {deadline: 5, other: 4}}
+	got := counterDeltas(before, after, 100)
+	if got.SendFailuresDeadline != 10 || got.SendFailuresOther != 3 {
+		t.Fatalf("send failures in window = %v deadline, %v other; want 10 and 3", got.SendFailuresDeadline, got.SendFailuresOther)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"send_failures_deadline":10`, `"send_failures_other":3`} {
+		if !strings.Contains(string(data), field) {
+			t.Errorf("counters JSON lacks %s: %s", field, data)
+		}
 	}
 }

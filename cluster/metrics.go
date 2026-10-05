@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -32,6 +34,7 @@ type nodeMetrics struct {
 	quorumLoss        prometheus.Counter
 	proposals         *prometheus.CounterVec
 	transportFailures *prometheus.CounterVec
+	sendFailures      *prometheus.CounterVec
 	rpcRequests       *prometheus.CounterVec
 	rpcDuration       *prometheus.HistogramVec
 	logSyncs          prometheus.Counter
@@ -59,6 +62,7 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		quorumLoss:        prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_quorum_loss_total", Help: "Leader stepdowns without a higher term.", ConstLabels: constant}),
 		proposals:         prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_proposals_total", Help: "Client proposals by outcome.", ConstLabels: constant}, []string{"result"}),
 		transportFailures: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_transport_failures_total", Help: "Failed outbound Raft RPCs.", ConstLabels: constant}, []string{"peer_id"}),
+		sendFailures:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_transport_send_failures_total", Help: "Failed outbound Raft sends by error class: deadline (the send's deadline expired) or other.", ConstLabels: constant}, []string{"class"}),
 		rpcRequests:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_grpc_requests_total", Help: "gRPC requests by method and status.", ConstLabels: constant}, []string{"method", "code"}),
 		rpcDuration:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "lsmdb_grpc_request_duration_seconds", Help: "gRPC request latency.", ConstLabels: constant, Buckets: prometheus.DefBuckets}, []string{"method"}),
 		logSyncs:          prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_syncs_total", Help: "Raft log append syncs: successful persists carrying at least one entry.", ConstLabels: constant}),
@@ -71,10 +75,13 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 	for _, origin := range []raft.MessageOrigin{raft.OriginOther, raft.OriginHeartbeat, raft.OriginProposal, raft.OriginCommitAdvance, raft.OriginAckResend} {
 		m.appendMessages.WithLabelValues(origin.String())
 	}
+	for _, class := range []string{sendFailureDeadline, sendFailureOther} {
+		m.sendFailures.WithLabelValues(class)
+	}
 	m.registry.MustRegister(
 		m.role, m.term, m.leader, m.commit, m.applied, m.logLength, m.snapshotIndex, m.replicationLag,
 		m.elections, m.leadershipChanges, m.quorumLoss, m.proposals,
-		m.transportFailures, m.rpcRequests, m.rpcDuration,
+		m.transportFailures, m.sendFailures, m.rpcRequests, m.rpcDuration,
 		m.logSyncs, m.logSyncEntries, m.hardStateSyncs, m.appendMessages, m.applySeconds, m.snapshotSeconds,
 	)
 	return m
@@ -182,18 +189,37 @@ func (t *observedTransport) Send(ctx context.Context, message raft.Message) erro
 		t.metrics.appendMessages.WithLabelValues(message.Origin.String()).Inc()
 	}
 	err := t.inner.Send(ctx, message)
-	if err != nil {
-		t.metrics.transportFailures.WithLabelValues(strconv.FormatUint(message.To, 10)).Inc()
-	}
+	t.countFailure(message, err)
 	return err
 }
 
 func (t *observedTransport) SendSnapshot(ctx context.Context, message raft.Message, reader io.Reader, size uint64, checksum uint32) error {
 	err := t.inner.SendSnapshot(ctx, message, reader, size, checksum)
-	if err != nil {
-		t.metrics.transportFailures.WithLabelValues(strconv.FormatUint(message.To, 10)).Inc()
-	}
+	t.countFailure(message, err)
 	return err
+}
+
+func (t *observedTransport) countFailure(message raft.Message, err error) {
+	if err == nil {
+		return
+	}
+	t.metrics.transportFailures.WithLabelValues(strconv.FormatUint(message.To, 10)).Inc()
+	t.metrics.sendFailures.WithLabelValues(sendFailureClass(err)).Inc()
+}
+
+const (
+	sendFailureDeadline = "deadline"
+	sendFailureOther    = "other"
+)
+
+// sendFailureClass separates sends whose deadline expired, whether the error
+// came from the local context or back from the peer as a gRPC status, from
+// every other failure.
+func sendFailureClass(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
+		return sendFailureDeadline
+	}
+	return sendFailureOther
 }
 
 // observedStore counts Raft persistence effects. raftstore.Store.append issues

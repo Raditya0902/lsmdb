@@ -2,7 +2,10 @@ package main
 
 import "strings"
 
-const appendMetricPrefix = "lsmdb_raft_append_messages_total{origin="
+const (
+	appendMetricPrefix      = "lsmdb_raft_append_messages_total{origin="
+	sendFailureMetricPrefix = "lsmdb_raft_transport_send_failures_total{class="
+)
 
 // Counters holds replication counter deltas over the measurement window,
 // summed across the three nodes, and ratios per committed entry.
@@ -20,6 +23,10 @@ type Counters struct {
 	EntriesPerSync                  float64            `json:"entries_per_log_sync"`
 	AppendPerCommittedEntry         float64            `json:"append_messages_per_committed_entry"`
 	AppendPerCommittedEntryByOrigin map[string]float64 `json:"append_messages_per_committed_entry_by_origin"`
+	// SendFailuresDeadline counts outbound Raft sends whose deadline expired;
+	// SendFailuresOther counts every other failed send.
+	SendFailuresDeadline float64 `json:"send_failures_deadline"`
+	SendFailuresOther    float64 `json:"send_failures_other"`
 }
 
 // counterDeltas subtracts per-node registry snapshots taken at window start
@@ -40,6 +47,8 @@ func counterDeltas(before, after []map[string]float64, committed uint64) Counter
 		ApplySeconds:   delta("lsmdb_raft_apply_seconds_sum"), ApplyCount: delta("lsmdb_raft_apply_seconds_count"),
 		SnapshotSeconds: delta("lsmdb_raft_snapshot_seconds_sum"), SnapshotCount: delta("lsmdb_raft_snapshot_seconds_count"),
 		AppendMessages: map[string]float64{}, AppendPerCommittedEntryByOrigin: map[string]float64{},
+		SendFailuresDeadline: delta(sendFailureMetricPrefix + "deadline}"),
+		SendFailuresOther:    delta(sendFailureMetricPrefix + "other}"),
 	}
 	origins := map[string]bool{}
 	for _, values := range after {

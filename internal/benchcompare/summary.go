@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"text/tabwriter"
 )
 
@@ -49,6 +50,11 @@ type Cell struct {
 	EntriesPerSync    Range  `json:"entries_per_log_sync"`
 	AppendsPerEntry   Range  `json:"append_messages_per_committed_entry"`
 	AckResendPerEntry Range  `json:"ack_resend_per_committed_entry"`
+	// Send failures per measurement window, over the valid runs that recorded
+	// them; reports built before the field existed do not count.
+	SendFailuresRecorded int   `json:"send_failures_recorded_runs"`
+	SendFailuresDeadline Range `json:"send_failures_deadline"`
+	SendFailuresOther    Range `json:"send_failures_other"`
 }
 
 // MinValidRuns is the fewest valid runs each arm needs before a comparison
@@ -66,6 +72,8 @@ type Comparison struct {
 	BaseValidRuns        int     `json:"base_valid_runs"`
 	OtherValidRuns       int     `json:"other_valid_runs"`
 	InsufficientRuns     bool    `json:"insufficient_runs"`
+	AppendsRatio         float64 `json:"appends_per_entry_median_ratio"`
+	AppendsMeaningful    bool    `json:"appends_per_entry_meaningful"`
 	ThroughputRatio      float64 `json:"throughput_median_ratio"`
 	ThroughputMeaningful bool    `json:"throughput_meaningful"`
 	P99Meaningful        bool    `json:"p99_meaningful"`
@@ -92,6 +100,8 @@ type runView struct {
 		EntriesPerSync  float64            `json:"entries_per_log_sync"`
 		AppendsPerEntry float64            `json:"append_messages_per_committed_entry"`
 		ByOrigin        map[string]float64 `json:"append_messages_per_committed_entry_by_origin"`
+		SendDeadline    *float64           `json:"send_failures_deadline"`
+		SendOther       *float64           `json:"send_failures_other"`
 	} `json:"counters"`
 }
 
@@ -109,6 +119,7 @@ type cellKey struct {
 type cellValues struct {
 	valid, invalid                                       int
 	throughput, p99, syncs, perSync, appends, ackResends []float64
+	sendDeadline, sendOther                              []float64
 }
 
 // Summarize groups runs by arm and client count, excluding invalid runs from
@@ -184,6 +195,10 @@ func (v *cellValues) add(run runView) {
 	v.perSync = append(v.perSync, run.Counters.EntriesPerSync)
 	v.appends = append(v.appends, run.Counters.AppendsPerEntry)
 	v.ackResends = append(v.ackResends, run.Counters.ByOrigin["ack_resend"])
+	if run.Counters.SendDeadline != nil && run.Counters.SendOther != nil {
+		v.sendDeadline = append(v.sendDeadline, *run.Counters.SendDeadline)
+		v.sendOther = append(v.sendOther, *run.Counters.SendOther)
+	}
 }
 
 func (v *cellValues) cell(key cellKey) Cell {
@@ -192,6 +207,8 @@ func (v *cellValues) cell(key cellKey) Cell {
 		Throughput: Describe(v.throughput), P99Ms: Describe(v.p99),
 		SyncsPerEntry: Describe(v.syncs), EntriesPerSync: Describe(v.perSync),
 		AppendsPerEntry: Describe(v.appends), AckResendPerEntry: Describe(v.ackResends),
+		SendFailuresRecorded: len(v.sendDeadline),
+		SendFailuresDeadline: Describe(v.sendDeadline), SendFailuresOther: Describe(v.sendOther),
 	}
 }
 
@@ -221,6 +238,10 @@ func compare(cells []Cell, arms []ArmBuild) []Comparison {
 			if b.ValidRuns > 0 && o.ValidRuns > 0 && b.Throughput.Median != 0 {
 				cmp.ThroughputRatio = o.Throughput.Median / b.Throughput.Median
 			}
+			if b.ValidRuns > 0 && o.ValidRuns > 0 && b.AppendsPerEntry.Median != 0 {
+				cmp.AppendsRatio = o.AppendsPerEntry.Median / b.AppendsPerEntry.Median
+			}
+			cmp.AppendsMeaningful = !cmp.InsufficientRuns && Meaningful(b.AppendsPerEntry, o.AppendsPerEntry)
 			cmp.ThroughputMeaningful = !cmp.InsufficientRuns && Meaningful(b.Throughput, o.Throughput)
 			cmp.P99Meaningful = !cmp.InsufficientRuns && Meaningful(b.P99Ms, o.P99Ms)
 			out = append(out, cmp)
@@ -238,26 +259,40 @@ func WriteSummary(w io.Writer, summary Summary) error {
 		fmt.Fprintln(w, "INCOMPLETE: the comparison stopped before every slot ran; arms may have unequal runs")
 	}
 	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(table, "clients\tarm\tvalid\tinvalid\tops/s median [min, max]\tp99 ms median [min, max]\tsyncs/entry\tentries/sync\tappends/entry\tack_resend/entry")
+	// Total AppendEntries per committed entry is the headline replication metric,
+	// so it leads. ack_resend's meaning depends on the engine revision; do not
+	// compare it across arms.
+	fmt.Fprintln(table, "clients\tarm\tvalid\tinvalid\tappends/entry median [min, max]\tops/s median [min, max]\tp99 ms median [min, max]\tsyncs/entry\tentries/sync\tack_resend/entry\tdeadline fails/run\tother fails/run")
 	for _, c := range summary.Cells {
-		fmt.Fprintf(table, "%d\t%s\t%d\t%d\t%s\t%s\t%.2f\t%.2f\t%.1f\t%.1f\n",
-			c.Clients, c.Arm, c.ValidRuns, c.InvalidRuns, formatRange(c.Throughput, 1), formatRange(c.P99Ms, 2),
-			c.SyncsPerEntry.Median, c.EntriesPerSync.Median, c.AppendsPerEntry.Median, c.AckResendPerEntry.Median)
+		fmt.Fprintf(table, "%d\t%s\t%d\t%d\t%s\t%s\t%s\t%.2f\t%.2f\t%.1f\t%s\t%s\n",
+			c.Clients, c.Arm, c.ValidRuns, c.InvalidRuns, formatRange(c.AppendsPerEntry, 1),
+			formatRange(c.Throughput, 1), formatRange(c.P99Ms, 2),
+			c.SyncsPerEntry.Median, c.EntriesPerSync.Median, c.AckResendPerEntry.Median,
+			failureMedian(c, c.SendFailuresDeadline), failureMedian(c, c.SendFailuresOther))
 	}
 	if err := table.Flush(); err != nil {
 		return err
 	}
 	for _, cmp := range summary.Comparisons {
 		if cmp.InsufficientRuns {
-			fmt.Fprintf(w, "clients %d, %s vs %s: throughput x%.3f; insufficient runs (%s %d valid, %s %d valid; need %d per arm)\n",
-				cmp.Clients, cmp.Other, cmp.Base, cmp.ThroughputRatio,
+			fmt.Fprintf(w, "clients %d, %s vs %s: appends/entry x%.3f; throughput x%.3f; insufficient runs (%s %d valid, %s %d valid; need %d per arm)\n",
+				cmp.Clients, cmp.Other, cmp.Base, cmp.AppendsRatio, cmp.ThroughputRatio,
 				cmp.Base, cmp.BaseValidRuns, cmp.Other, cmp.OtherValidRuns, MinValidRuns)
 			continue
 		}
-		fmt.Fprintf(w, "clients %d, %s vs %s: throughput x%.3f %s; p99 %s\n", cmp.Clients, cmp.Other, cmp.Base,
-			cmp.ThroughputRatio, verdict(cmp.ThroughputMeaningful), verdict(cmp.P99Meaningful))
+		fmt.Fprintf(w, "clients %d, %s vs %s: appends/entry x%.3f %s; throughput x%.3f %s; p99 %s\n", cmp.Clients, cmp.Other, cmp.Base,
+			cmp.AppendsRatio, verdict(cmp.AppendsMeaningful), cmp.ThroughputRatio, verdict(cmp.ThroughputMeaningful), verdict(cmp.P99Meaningful))
 	}
 	return nil
+}
+
+// failureMedian prints a send-failure median, or "-" when no valid run in the
+// cell recorded send failures.
+func failureMedian(c Cell, r Range) string {
+	if c.SendFailuresRecorded == 0 {
+		return "-"
+	}
+	return strconv.FormatFloat(r.Median, 'f', -1, 64)
 }
 
 func formatRange(r Range, decimals int) string {

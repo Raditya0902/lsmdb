@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"lsmdb/internal/raft"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type fakeStableStore struct{ err error }
@@ -25,6 +28,19 @@ type fakeTransport struct{}
 func (fakeTransport) Send(context.Context, raft.Message) error { return nil }
 func (fakeTransport) SendSnapshot(context.Context, raft.Message, io.Reader, uint64, uint32) error {
 	return nil
+}
+
+// failingTransport returns the next queued error for each send.
+type failingTransport struct{ errs []error }
+
+func (t *failingTransport) next() error {
+	err := t.errs[0]
+	t.errs = t.errs[1:]
+	return err
+}
+func (t *failingTransport) Send(context.Context, raft.Message) error { return t.next() }
+func (t *failingTransport) SendSnapshot(context.Context, raft.Message, io.Reader, uint64, uint32) error {
+	return t.next()
 }
 
 func entries(n int) []raft.Entry {
@@ -149,5 +165,45 @@ func TestNodeMetricSnapshotExposesReplicationCounters(t *testing.T) {
 	}
 	if _, ok := values["lsmdb_raft_snapshot_seconds_count"]; !ok {
 		t.Error("snapshot histogram is not registered")
+	}
+}
+
+func TestObservedTransportClassifiesSendFailures(t *testing.T) {
+	sendErrors := []error{
+		context.DeadlineExceeded,
+		fmt.Errorf("deliver: %w", context.DeadlineExceeded),
+		status.Error(codes.DeadlineExceeded, "context deadline exceeded"),
+		status.FromContextError(context.DeadlineExceeded).Err(),
+		context.Canceled,
+		errors.New("raft message dropped"),
+		status.Error(codes.Unavailable, "connection refused"),
+		nil,
+	}
+	metrics := newNodeMetrics(1)
+	transport := &observedTransport{inner: &failingTransport{errs: append([]error(nil), sendErrors...)}, metrics: metrics}
+	for i := 0; i < len(sendErrors)-1; i++ {
+		_ = transport.Send(context.Background(), raft.Message{Type: raft.MsgAppend, To: 2})
+	}
+	_ = transport.SendSnapshot(context.Background(), raft.Message{Type: raft.MsgSnapshot, To: 3}, nil, 0, 0)
+	got := mustSnapshot(t, metrics)
+	want := map[string]float64{
+		"lsmdb_raft_transport_send_failures_total{class=deadline}": 4,
+		"lsmdb_raft_transport_send_failures_total{class=other}":    3,
+		"lsmdb_raft_transport_failures_total{peer_id=2}":           7,
+	}
+	for name, value := range want {
+		if count, ok := got[name]; !ok || count != value {
+			t.Errorf("%s = (%v, present=%v), want %v", name, count, ok, value)
+		}
+	}
+}
+
+func TestSendFailureClassesAreRegisteredAtZero(t *testing.T) {
+	got := mustSnapshot(t, newNodeMetrics(1))
+	for _, class := range []string{"deadline", "other"} {
+		name := "lsmdb_raft_transport_send_failures_total{class=" + class + "}"
+		if value, ok := got[name]; !ok || value != 0 {
+			t.Errorf("%s = (%v, present=%v), want 0 before any failure", name, value, ok)
+		}
 	}
 }

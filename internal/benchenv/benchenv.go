@@ -100,8 +100,19 @@ func gitRevision() (string, bool) {
 	if err != nil {
 		return unknown, false
 	}
-	status, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output()
-	return strings.TrimSpace(string(out)), err != nil || len(strings.TrimSpace(string(status))) > 0
+	return strings.TrimSpace(string(out)), treeDirty("")
+}
+
+// treeDirty reports whether the work tree at dir ("" for the current
+// directory) differs from HEAD with git status --porcelain semantics: tracked
+// changes and untracked files count, ignored files do not. That matches the
+// vcs.modified stamp go build records, which gitRevision prefers. A failed
+// status counts as dirty.
+func treeDirty(dir string) bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dir
+	status, err := cmd.Output()
+	return err != nil || len(strings.TrimSpace(string(status))) > 0
 }
 
 func collectLinux(env *Environment, dataDir string) {

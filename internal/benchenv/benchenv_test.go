@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -193,5 +194,52 @@ func TestEnvironmentRecordsCPUCount(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"num_cpu":0`) {
 		t.Fatalf("a zero num_cpu must still be written, so a missing one means an older tool: %s", data)
+	}
+}
+
+func TestTreeDirtyFollowsGitStatusPorcelain(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-q")
+	write(".gitignore", "ignored.txt\n")
+	write("tracked.txt", "v1\n")
+	git("add", ".")
+	git("-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "init")
+
+	steps := []struct {
+		name string
+		edit func()
+		want bool
+	}{
+		{"clean", func() {}, false},
+		{"ignored file", func() { write("ignored.txt", "x\n") }, false},
+		{"untracked file", func() { write("new.txt", "x\n") }, true},
+		{"modified tracked file", func() {
+			if err := os.Remove(filepath.Join(dir, "new.txt")); err != nil {
+				t.Fatal(err)
+			}
+			write("tracked.txt", "v2\n")
+		}, true},
+	}
+	for _, step := range steps {
+		step.edit()
+		if got := treeDirty(dir); got != step.want {
+			t.Errorf("%s: treeDirty = %v, want %v", step.name, got, step.want)
+		}
 	}
 }

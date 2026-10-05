@@ -538,3 +538,63 @@ func TestPreVoteRequestDoesNotChangeReceiverTermOrDisruptLeader(t *testing.T) {
 		t.Fatalf("follower after pre-vote request: role=%s term=%d hard=%+v", status.Role, status.Term, update.HardState)
 	}
 }
+
+func newPreCandidate(t *testing.T, term uint64) *Node {
+	t.Helper()
+	node, err := New(testConfig(1), HardState{Term: term}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20 && node.Status().Role != PreCandidate; i++ {
+		node.Tick()
+	}
+	if node.Status().Role != PreCandidate {
+		t.Fatalf("role = %s, want pre-candidate", node.Status().Role)
+	}
+	return node
+}
+
+func TestPreVoteRejectionIsNeverCountedAsGrant(t *testing.T) {
+	// Node 1 at term 3 proposes term 4. One more grant would win a pre-vote among
+	// three voters, so counting any of these rejections as a grant starts an election.
+	cases := []struct {
+		name string
+		term uint64
+	}{
+		{name: "responder at the candidate's term", term: 3},
+		{name: "responder behind the candidate", term: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newPreCandidate(t, 3)
+			update := node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: tc.term, Reject: true})
+			status := node.Status()
+			if status.Role != PreCandidate || status.Term != 3 || update.HardState != nil {
+				t.Fatalf("after rejection at term %d: role=%s term=%d hard=%+v, want pre-candidate at 3",
+					tc.term, status.Role, status.Term, update.HardState)
+			}
+			if len(update.Messages) != 0 {
+				t.Fatalf("rejection produced messages %+v", update.Messages)
+			}
+		})
+	}
+}
+
+func TestAdoptedTermIsInUpdateBeforeAnyMessageAtThatTerm(t *testing.T) {
+	node := newPreCandidate(t, 1)
+	update := node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: 5, Reject: true})
+	if update.HardState == nil || update.HardState.Term != 5 {
+		t.Fatalf("HardState = %+v, want term 5", update.HardState)
+	}
+	if len(update.Messages) != 0 {
+		t.Fatalf("adoption update sent %+v before its term was persisted", update.Messages)
+	}
+	// The next pre-vote is built on the adopted term and comes from a later update.
+	var next []Message
+	for i := 0; i < 20 && len(next) == 0; i++ {
+		next = node.Tick().Messages
+	}
+	if len(next) == 0 || next[0].Type != MsgPreVote || next[0].Term != 6 {
+		t.Fatalf("next messages = %+v, want pre-votes proposing term 6", next)
+	}
+}

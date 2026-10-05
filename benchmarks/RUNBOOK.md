@@ -134,6 +134,27 @@ To print the summary again later:
 go run scripts/bench_compare.go summarize benchmarks/results/<file>-compare.json
 ```
 
+### 3c. Failover
+
+After each run's throughput window, the tool:
+1. stops all clients;
+2. stops the node that reports Leader at the highest term;
+3. times one write through a client that was using that node.
+
+```bash
+go run ./cmd/clusterbench -official -mode failover -clients 1,4 -repetitions 5 \
+  -warmup 5s -duration 30s -data-dir "$BENCH"
+```
+
+The output has three timing fields:
+- `failover_ms` starts when the leader's shutdown begins.
+- `failover_after_close_ms` starts once `Close` returns. It matches the pre-rewrite
+  tool (`bd67696`) that produced the README failover column.
+- `leader_close_ms` is the gap between the two.
+
+The probe client retries every 25 ms for at most 60 attempts, so failover is
+resolved to about 25 ms.
+
 ## 4. Official embedded run
 
 ```bash

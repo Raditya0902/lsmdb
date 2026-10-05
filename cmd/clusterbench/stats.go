@@ -104,16 +104,31 @@ type ClientSummary struct {
 	Throughput  Range `json:"throughput_ops_per_sec"`
 	P50Ms       Range `json:"p50_ms"`
 	P99Ms       Range `json:"p99_ms"`
+	// Failover fields are set only in failover mode. They cover every run whose
+	// probe succeeded, valid or not, because the stop happens after the window.
+	FailoverProbesOK     int    `json:"failover_probes_ok,omitempty"`
+	FailoverProbesFailed int    `json:"failover_probes_failed,omitempty"`
+	FailoverMs           *Range `json:"failover_ms,omitempty"`
+	FailoverAfterCloseMs *Range `json:"failover_after_close_ms,omitempty"`
 }
 
 func summarize(runs []RunResult) []ClientSummary {
 	byClients := map[int]*ClientSummary{}
 	values := map[int][3][]float64{}
+	failovers := map[int][2][]float64{}
 	for _, run := range runs {
 		summary := byClients[run.Clients]
 		if summary == nil {
 			summary = &ClientSummary{Clients: run.Clients}
 			byClients[run.Clients] = summary
+		}
+		if f := run.Failover; f != nil && f.OK {
+			summary.FailoverProbesOK++
+			v := failovers[run.Clients]
+			v[0], v[1] = append(v[0], f.FailoverMs), append(v[1], f.AfterCloseMs)
+			failovers[run.Clients] = v
+		} else if f != nil {
+			summary.FailoverProbesFailed++
 		}
 		if !run.Valid {
 			summary.InvalidRuns++
@@ -130,6 +145,10 @@ func summarize(runs []RunResult) []ClientSummary {
 	for clients, summary := range byClients {
 		v := values[clients]
 		summary.Throughput, summary.P50Ms, summary.P99Ms = describe(v[0]), describe(v[1]), describe(v[2])
+		if f, ok := failovers[clients]; ok {
+			total, afterClose := describe(f[0]), describe(f[1])
+			summary.FailoverMs, summary.FailoverAfterCloseMs = &total, &afterClose
+		}
 		out = append(out, *summary)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Clients < out[j].Clients })

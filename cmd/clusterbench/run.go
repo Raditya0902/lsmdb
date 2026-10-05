@@ -89,6 +89,11 @@ func runOnce(opts options, clients, repetition int) (RunResult, error) {
 	result.ElectionsInWindow = maxOf(result.TermsEnd) - min(maxOf(result.TermsStart), maxOf(result.TermsEnd))
 	result.CommittedEntries = maxCommit(endStatus) - min(maxCommit(startStatus), maxCommit(endStatus))
 	result.Counters = counterDeltas(startCounters, endCounters, result.CommittedEntries)
+	if opts.mode == modeFailover {
+		if result.Failover, err = measureFailover(nodes, workers[0].client, workers[0].value); err != nil {
+			return result, fmt.Errorf("failover: %w", err)
+		}
+	}
 
 	if result.FsyncAfter, err = benchenv.MeasureFsync(base, fsyncProbeSamples); err != nil {
 		return result, err

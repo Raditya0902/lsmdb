@@ -32,6 +32,7 @@ func parseFlags(args []string) (options, error) {
 	flags := flag.NewFlagSet("clusterbench", flag.ContinueOnError)
 	clients := flags.String("clients", "1,2,4,8,16", "comma-separated client counts; each runs on a fresh cluster")
 	opts := options{}
+	flags.StringVar(&opts.mode, "mode", modeThroughput, "throughput: measure the write window only; failover: also stop the current leader after the window and time the first successful write")
 	flags.DurationVar(&opts.warmup, "warmup", 5*time.Second, "time clients run before the measurement window")
 	flags.DurationVar(&opts.duration, "duration", 30*time.Second, "measurement window length")
 	flags.IntVar(&opts.repetitions, "repetitions", 5, "fresh-cluster repetitions per client count")
@@ -55,6 +56,9 @@ func parseFlags(args []string) (options, error) {
 	if opts.warmup < 0 || opts.duration <= 0 || opts.repetitions <= 0 || opts.tick <= 0 || opts.valueSize < 0 {
 		return options{}, errors.New("-duration, -repetitions and -tick must be positive; -warmup and -value-size non-negative")
 	}
+	if opts.mode != modeThroughput && opts.mode != modeFailover {
+		return options{}, fmt.Errorf("invalid -mode %q: want %s or %s", opts.mode, modeThroughput, modeFailover)
+	}
 	if opts.dataDir == "" {
 		opts.dataDir = os.TempDir()
 	}
@@ -68,7 +72,7 @@ func run(opts options) error {
 	}
 	report := Report{
 		SchemaVersion: schemaVersion, Label: label, Environment: benchenv.Collect(opts.dataDir),
-		Config: buildConfig(opts), Limitations: limitations,
+		Config: buildConfig(opts), Limitations: limitationsFor(opts.mode),
 	}
 	out, err := createOutput(opts.out, label, report.Environment.GitSHA)
 	if err != nil {
@@ -90,6 +94,10 @@ func run(opts options) error {
 			}
 			fmt.Fprintf(os.Stderr, "rep %d clients %d: %.1f ops/s p50 %.2f ms p99 %.2f ms failed %d (%s)\n",
 				repetition, clients, result.Throughput, result.Latency.P50, result.Latency.P99, result.OpsFailed, status)
+			if f := result.Failover; f != nil {
+				fmt.Fprintf(os.Stderr, "  failover: stopped node %d (term %d), probe ok=%v after %.1f ms (%.1f ms after close), new leader %d (term %d)\n",
+					f.StoppedLeader, f.StoppedTerm, f.OK, f.FailoverMs, f.AfterCloseMs, f.NewLeader, f.NewTerm)
+			}
 		}
 	}
 	report.Summary = summarize(report.Runs)

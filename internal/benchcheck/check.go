@@ -91,6 +91,7 @@ type envView struct {
 	GitSHA         string `json:"git_sha"`
 	GitDirty       bool   `json:"git_dirty"`
 	GOOS           string `json:"goos"`
+	NumCPU         *int   `json:"num_cpu"`
 	GOMAXPROCS     int    `json:"gomaxprocs"`
 	CPUModel       string `json:"cpu_model"`
 	FsyncPrimitive string `json:"fsync_primitive"`
@@ -146,10 +147,12 @@ type unit struct {
 	report reportView
 }
 
-// input is a parsed file of either kind.
+// input is a parsed file of either kind. numCPU and gomaxprocs come from the
+// bench_compare driver, or from a clusterbench report's own environment.
 type input struct {
 	kind                  string
 	machineType, diskType string
+	numCPU, gomaxprocs    *int
 	repetitions           *int
 	complete              bool
 	clients               []int
@@ -192,6 +195,7 @@ func parse(data []byte) (input, error) {
 		}
 		return input{
 			kind: KindClusterbench, machineType: report.MachineType, diskType: report.DiskType,
+			numCPU: report.Environment.NumCPU, gomaxprocs: &report.Environment.GOMAXPROCS,
 			repetitions: report.Config.Repetitions, complete: true,
 			units: []unit{{name: "report", report: report}},
 		}, nil
@@ -206,6 +210,8 @@ func parseCompare(data []byte) (input, error) {
 		Repetitions *int                    `json:"repetitions"`
 		MachineType string                  `json:"machine_type"`
 		DiskType    string                  `json:"disk_type"`
+		NumCPU      *int                    `json:"num_cpu"`
+		GOMAXPROCS  *int                    `json:"gomaxprocs"`
 		Arms        []benchcompare.ArmBuild `json:"arms"`
 		Runs        []struct {
 			Sequence int             `json:"sequence"`
@@ -218,6 +224,7 @@ func parseCompare(data []byte) (input, error) {
 	}
 	in := input{
 		kind: KindCompare, machineType: file.MachineType, diskType: file.DiskType,
+		numCPU: file.NumCPU, gomaxprocs: file.GOMAXPROCS,
 		repetitions: file.Repetitions, complete: file.Complete, clients: file.Clients, arms: file.Arms,
 	}
 	for _, run := range file.Runs {

@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -149,6 +150,7 @@ func runCommand(ctx context.Context, args []string) error {
 		SchemaVersion: benchcompare.SchemaVersion, Clients: opts.clients,
 		Repetitions: opts.repetitions, ExtraArgs: append([]string{}, opts.extra...),
 		MachineType: opts.machineType, DiskType: opts.diskType,
+		NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
 	}
 	binaries := map[string]string{}
 	worktrees := map[string]string{}

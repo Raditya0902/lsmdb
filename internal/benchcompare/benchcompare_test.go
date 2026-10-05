@@ -351,3 +351,15 @@ func TestMachineLabelsAreDriverFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestCombinedRecordsDriverCPUs(t *testing.T) {
+	data, err := json.Marshal(Combined{NumCPU: 8, GOMAXPROCS: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"num_cpu":8`, `"gomaxprocs":2`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("combined file lacks %s: %s", want, data)
+		}
+	}
+}

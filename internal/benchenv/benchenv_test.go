@@ -181,3 +181,17 @@ func TestOfficialRequiresLinux(t *testing.T) {
 		t.Errorf("official output dir = %q, want benchmarks/results", dir)
 	}
 }
+
+func TestEnvironmentRecordsCPUCount(t *testing.T) {
+	env := Collect(t.TempDir())
+	if env.NumCPU != runtime.NumCPU() || env.NumCPU <= 0 {
+		t.Fatalf("NumCPU = %d, want runtime.NumCPU() = %d", env.NumCPU, runtime.NumCPU())
+	}
+	data, err := json.Marshal(Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"num_cpu":0`) {
+		t.Fatalf("a zero num_cpu must still be written, so a missing one means an older tool: %s", data)
+	}
+}

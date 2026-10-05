@@ -33,6 +33,7 @@ type Environment struct {
 	Kernel         string `json:"kernel"`
 	CPUModel       string `json:"cpu_model"`
 	RAMBytes       uint64 `json:"ram_bytes"`
+	NumCPU         int    `json:"num_cpu"`
 	GOMAXPROCS     int    `json:"gomaxprocs"`
 	FsyncPrimitive string `json:"fsync_primitive"`
 	Filesystem     string `json:"filesystem"`
@@ -46,7 +47,7 @@ func Collect(dataDir string) Environment {
 	sha, dirty := gitRevision()
 	env := Environment{
 		GitSHA: sha, GitDirty: dirty, GoVersion: runtime.Version(),
-		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, GOMAXPROCS: runtime.GOMAXPROCS(0),
+		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
 		FsyncPrimitive: FsyncPrimitive(runtime.GOOS),
 		Kernel:         unknown, CPUModel: unknown, Filesystem: unknown, MountOptions: unknown, BlockDevice: unknown,
 	}

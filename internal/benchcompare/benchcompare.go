@@ -55,6 +55,8 @@ type ArmRun struct {
 
 // Combined is the merged output of one comparison. Complete is false until
 // every scheduled slot has finished, so a crashed run is recognisable.
+// NumCPU and GOMAXPROCS are the driver's own: the arms run as its children on
+// the same machine, but their pinned binaries may predate recording NumCPU.
 type Combined struct {
 	SchemaVersion int        `json:"schema_version"`
 	Complete      bool       `json:"complete"`
@@ -63,6 +65,8 @@ type Combined struct {
 	ExtraArgs     []string   `json:"clusterbench_args"`
 	MachineType   string     `json:"machine_type"`
 	DiskType      string     `json:"disk_type"`
+	NumCPU        int        `json:"num_cpu"`
+	GOMAXPROCS    int        `json:"gomaxprocs"`
 	Arms          []ArmBuild `json:"arms"`
 	Runs          []ArmRun   `json:"runs"`
 }

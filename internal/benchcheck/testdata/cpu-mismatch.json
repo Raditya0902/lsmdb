@@ -16,7 +16,7 @@
   "machine_type": "n2-standard-8",
   "disk_type": "local NVMe SSD",
   "num_cpu": 8,
-  "gomaxprocs": 8,
+  "gomaxprocs": 2,
   "arms": [
     {
       "name": "base",
@@ -57,7 +57,7 @@
           "kernel": "6.8.0-1015-gcp",
           "cpu_model": "Intel(R) Xeon(R) CPU @ 2.80GHz",
           "ram_bytes": 33654456320,
-          "gomaxprocs": 8,
+          "gomaxprocs": 2,
           "fsync_primitive": "fsync(2)",
           "filesystem": "ext4",
           "mount_options": "rw,relatime,rw,discard,errors=remount-ro",
@@ -161,9 +161,10 @@
           "kernel": "6.8.0-1015-gcp",
           "cpu_model": "Intel(R) Xeon(R) CPU @ 2.80GHz",
           "ram_bytes": 33654456320,
-          "gomaxprocs": 8,
+          "gomaxprocs": 2,
           "fsync_primitive": "fsync(2)",
           "filesystem": "ext4",
+          "mount_options": "rw,relatime,rw,discard,errors=remount-ro",
           "block_device": "nvme0n1 rotational=0 model=nvme_card"
         },
         "config": {

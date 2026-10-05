@@ -106,6 +106,8 @@ func TestEachFailureFixtureFailsOnlyItsCheck(t *testing.T) {
 		{"wrong-primitive", "fsync.primitive"},
 		{"missing-arm", "arms"},
 		{"missing-machine-type", "labels"},
+		{"missing-num-cpu", "env.cpu_count"},
+		{"cpu-mismatch", "env.cpu_count"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -206,6 +208,7 @@ func TestSingleClusterbenchReport(t *testing.T) {
 	}
 	single := combined.Runs[1].Report
 	single["machine_type"], single["disk_type"] = "n2-standard-8", "local NVMe SSD"
+	single["environment"].(map[string]any)["num_cpu"] = 8
 	data, err := json.Marshal(single)
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +222,34 @@ func TestSingleClusterbenchReport(t *testing.T) {
 	}
 	if result := statusOf(t, report, "arms"); result.Status != Pass {
 		t.Fatalf("arms = %s (%s)", result.Status, result.Detail)
+	}
+
+	for name, numCPU := range map[string]any{"missing": nil, "above gomaxprocs": 16} {
+		t.Run("num_cpu "+name, func(t *testing.T) {
+			edited := mutate(t, data, func(doc map[string]any) {
+				env := doc["environment"].(map[string]any)
+				if delete(env, "num_cpu"); numCPU != nil {
+					env["num_cpu"] = numCPU
+				}
+			})
+			report, err := Check(edited, Options{Identity: testIdentity, Expect: expectations(t)[1:]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result := statusOf(t, report, "env.cpu_count"); result.Status != Fail {
+				t.Fatalf("env.cpu_count = %s (%s), want FAIL", result.Status, result.Detail)
+			}
+		})
+	}
+}
+
+func TestCPUCountNamesBothValues(t *testing.T) {
+	result := statusOf(t, check(t, fixture(t, "cpu-mismatch")), "env.cpu_count")
+	if result.Status != Fail || !strings.Contains(result.Detail, "num_cpu 8") || !strings.Contains(result.Detail, "gomaxprocs 2") {
+		t.Fatalf("env.cpu_count = %s (%s), want FAIL naming num_cpu 8 and gomaxprocs 2", result.Status, result.Detail)
+	}
+	if result := statusOf(t, check(t, fixture(t, "good-compare")), "env.cpu_count"); !strings.Contains(result.Detail, "num_cpu 8") {
+		t.Fatalf("good fixture env.cpu_count detail %q does not show num_cpu", result.Detail)
 	}
 }
 

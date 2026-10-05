@@ -15,7 +15,6 @@
   ],
   "machine_type": "n2-standard-8",
   "disk_type": "local NVMe SSD",
-  "num_cpu": 8,
   "gomaxprocs": 8,
   "arms": [
     {
@@ -164,6 +163,7 @@
           "gomaxprocs": 8,
           "fsync_primitive": "fsync(2)",
           "filesystem": "ext4",
+          "mount_options": "rw,relatime,rw,discard,errors=remount-ro",
           "block_device": "nvme0n1 rotational=0 model=nvme_card"
         },
         "config": {

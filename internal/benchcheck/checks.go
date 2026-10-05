@@ -53,14 +53,31 @@ func checkOS(in input) Result {
 	})
 }
 
+// checkCPUCount fails unless the CPU count is recorded and every process ran
+// with GOMAXPROCS equal to it, so no run was limited to fewer CPUs.
 func checkCPUCount(in input) Result {
-	return perUnit("env.cpu_count", in, func(u unit) (string, error) {
+	const name = "env.cpu_count"
+	if in.numCPU == nil || *in.numCPU <= 0 {
+		return Result{name, Fail, "num_cpu not recorded; the file predates it or was not written by this tool"}
+	}
+	numCPU := *in.numCPU
+	if in.gomaxprocs == nil || *in.gomaxprocs != numCPU {
+		return Result{name, Fail, fmt.Sprintf("num_cpu %d but gomaxprocs %s: the run was limited to fewer CPUs", numCPU, intText(in.gomaxprocs))}
+	}
+	return perUnit(name, in, func(u unit) (string, error) {
 		env := u.report.Environment
-		if env.GOMAXPROCS <= 0 {
-			return "", fmt.Errorf("gomaxprocs not recorded")
+		if env.GOMAXPROCS != numCPU {
+			return "", fmt.Errorf("num_cpu %d but gomaxprocs %d: the run was limited to fewer CPUs", numCPU, env.GOMAXPROCS)
 		}
-		return fmt.Sprintf("gomaxprocs %d, %s", env.GOMAXPROCS, env.CPUModel), nil
+		return fmt.Sprintf("num_cpu %d = gomaxprocs, %s", numCPU, env.CPUModel), nil
 	})
+}
+
+func intText(value *int) string {
+	if value == nil {
+		return "not recorded"
+	}
+	return fmt.Sprint(*value)
 }
 
 func checkDataDirFS(in input) Result {

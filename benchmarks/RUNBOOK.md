@@ -308,20 +308,34 @@ the kernel release `5.15.153.1` can trip it. If it flags one:
 
 Never loosen the pattern without a test.
 
-**CPU count.** The environment block records `gomaxprocs`, not the machine's CPU
-count. Since Go 1.25, `gomaxprocs` follows container CPU limits, so it can be lower.
-Until the block records the CPU count itself, keep a notes file next to each
-official result:
+**CPU count.** `bench_compare` records its own `num_cpu` (`runtime.NumCPU()`) and
+`gomaxprocs` in the combined file. It runs on the same machine as the arms, whose
+pinned `clusterbench` binaries predate `num_cpu`. A `clusterbench` report built
+from this checkout records `num_cpu` in its environment block. The checker fails a
+file in two cases:
+- `num_cpu` is missing;
+- `num_cpu` differs from `gomaxprocs`, in the driver or in any report.
+
+This catches an explicit `GOMAXPROCS` setting, but not every container limit:
+- The `go 1.22.0` line in `go.mod` turns off Go's container-aware GOMAXPROCS
+  (`containermaxprocs=0`), so a CPU quota changes neither value.
+- `runtime.NumCPU()` counts only the CPUs the process may use, so a cpuset limit
+  lowers both values together.
+
+So keep a notes file next to each official result:
 
 ```bash
-{ echo "nproc: $(nproc)"; lscpu; } > "benchmarks/results/$(date -u +%F)-notes.txt"
-grep -m1 '"gomaxprocs"' benchmarks/results/<file>-compare.json \
-  >> "benchmarks/results/$(date -u +%F)-notes.txt"
+{
+  echo "nproc: $(nproc)  nproc --all: $(nproc --all)"
+  echo "cpu.max: $(cat "/sys/fs/cgroup$(cut -d: -f3- /proc/self/cgroup)/cpu.max" 2>/dev/null || echo none)"
+  lscpu
+} > "benchmarks/results/$(date -u +%F)-notes.txt"
 ```
 
-`gomaxprocs` must equal `nproc`. A `num_cpu` field in the environment block is
-planned as a separate small commit. That commit must land before any official
-result file is committed.
+The notes must show three things:
+- `nproc` equals `nproc --all`;
+- `nproc` equals the machine type's vCPU count;
+- `cpu.max` starts with `max` (no quota) or is `none`.
 
 **Archiving.** Keep together:
 - the compare JSON files;

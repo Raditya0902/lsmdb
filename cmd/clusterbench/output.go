@@ -31,6 +31,8 @@ type options struct {
 	official          bool
 	out               string
 	dataDir           string
+	machineType       string
+	diskType          string
 }
 
 // Config is the reproducible run configuration recorded in the report. It holds
@@ -93,6 +95,8 @@ type RunResult struct {
 type Report struct {
 	SchemaVersion int                  `json:"schema_version"`
 	Label         string               `json:"label"`
+	MachineType   string               `json:"machine_type"`
+	DiskType      string               `json:"disk_type"`
 	Environment   benchenv.Environment `json:"environment"`
 	Config        Config               `json:"config"`
 	Limitations   []string             `json:"limitations"`

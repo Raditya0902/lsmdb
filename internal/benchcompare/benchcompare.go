@@ -8,14 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 // SchemaVersion identifies the layout of a Combined result file.
 const SchemaVersion = 1
 
-// driverFlags are clusterbench flags the driver sets on every invocation.
-var driverFlags = map[string]bool{"clients": true, "repetitions": true, "out": true}
+// driverFlags are clusterbench flags the driver sets on every invocation, or
+// labels the driver records itself because older arms' binaries lack them.
+var driverFlags = map[string]bool{
+	"clients": true, "repetitions": true, "out": true, "machine-type": true, "disk-type": true,
+}
 
 var armName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
@@ -57,6 +61,8 @@ type Combined struct {
 	Clients       []int      `json:"clients"`
 	Repetitions   int        `json:"repetitions"`
 	ExtraArgs     []string   `json:"clusterbench_args"`
+	MachineType   string     `json:"machine_type"`
+	DiskType      string     `json:"disk_type"`
 	Arms          []ArmBuild `json:"arms"`
 	Runs          []ArmRun   `json:"runs"`
 }
@@ -129,4 +135,31 @@ func ValidateExtraArgs(args []string) error {
 		}
 	}
 	return nil
+}
+
+// RequireMachineLabels rejects an official comparison (-official among the
+// pass-through arguments) unless both the machine and disk type are named.
+func RequireMachineLabels(extra []string, machineType, diskType string) error {
+	if !passesOfficial(extra) {
+		return nil
+	}
+	if strings.TrimSpace(machineType) == "" || strings.TrimSpace(diskType) == "" {
+		return errors.New("an -official comparison requires the driver's -machine-type and -disk-type")
+	}
+	return nil
+}
+
+func passesOfficial(extra []string) bool {
+	official := false
+	for _, arg := range extra {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if !strings.HasPrefix(arg, "-") || name != "official" {
+			continue
+		}
+		official = true
+		if hasValue {
+			official, _ = strconv.ParseBool(value)
+		}
+	}
+	return official
 }

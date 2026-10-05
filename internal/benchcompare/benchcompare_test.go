@@ -318,3 +318,36 @@ func TestComparisonNeedsMinValidRunsPerArm(t *testing.T) {
 		})
 	}
 }
+
+func TestOfficialComparisonsNeedMachineAndDiskType(t *testing.T) {
+	cases := []struct {
+		name          string
+		extra         []string
+		machine, disk string
+		wantErr       bool
+	}{
+		{"secondary without labels", []string{"-duration=10s"}, "", "", false},
+		{"official without labels", []string{"-official"}, "", "", true},
+		{"official without disk", []string{"--official"}, "n2-standard-8", "", true},
+		{"official=true without machine", []string{"-official=true"}, "", "pd-ssd", true},
+		{"official with blank label", []string{"-official"}, "n2-standard-8", "  ", true},
+		{"official with labels", []string{"-official", "-duration=30s"}, "n2-standard-8", "pd-ssd", false},
+		{"official=false without labels", []string{"-official=false"}, "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := RequireMachineLabels(tc.extra, tc.machine, tc.disk)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RequireMachineLabels(%q, %q, %q) = %v, want error %v", tc.extra, tc.machine, tc.disk, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestMachineLabelsAreDriverFlags(t *testing.T) {
+	for _, args := range [][]string{{"-machine-type", "x"}, {"--disk-type=pd-ssd"}} {
+		if err := ValidateExtraArgs(args); err == nil {
+			t.Errorf("ValidateExtraArgs(%q) passed a label through to arms that may not accept it", args)
+		}
+	}
+}

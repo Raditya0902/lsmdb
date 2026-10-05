@@ -53,7 +53,14 @@ call it `$BENCH`.
 
 ```bash
 export BENCH=/mnt/bench && mkdir -p "$BENCH"
+export MACHINE="n2-standard-8"   # the provider's machine type, or the host's model
+export DISK="local NVMe SSD"     # the disk under $BENCH, e.g. local NVMe or pd-ssd
 ```
+
+Official cluster runs refuse to start without `-machine-type` and `-disk-type`.
+`bench_compare` takes these two flags itself, before `--`. It records them in the
+combined file instead of passing them to the arms, because older arms'
+`clusterbench` binaries do not accept them.
 
 ## 2. Pre-run checklist
 
@@ -127,6 +134,7 @@ go run scripts/bench_compare.go run \
   -arm nocounters=ed0e92e -arm counters=8eae967 \
   -clients 1 -repetitions 5 -work "$BENCH/overhead" \
   -out "benchmarks/results/$(date -u +%F)-overhead-compare.json" \
+  -machine-type "$MACHINE" -disk-type "$DISK" \
   -- -official -warmup 5s -duration 30s -data-dir "$BENCH"
 ```
 
@@ -137,6 +145,7 @@ go run scripts/bench_compare.go run \
   -arm base=bd67696+ed0e92e,8eae967 -arm tip=8eae967 \
   -clients 1,2,4,8,16 -repetitions 5 -work "$BENCH/baseline" \
   -out "benchmarks/results/$(date -u +%F)-baseline-compare.json" \
+  -machine-type "$MACHINE" -disk-type "$DISK" \
   -- -official -warmup 5s -duration 30s -data-dir "$BENCH"
 ```
 
@@ -164,7 +173,7 @@ After each run's throughput window, the tool:
 
 ```bash
 go run ./cmd/clusterbench -official -mode failover -clients 1,4 -repetitions 5 \
-  -warmup 5s -duration 30s -data-dir "$BENCH"
+  -warmup 5s -duration 30s -data-dir "$BENCH" -machine-type "$MACHINE" -disk-type "$DISK"
 ```
 
 The output has three timing fields:

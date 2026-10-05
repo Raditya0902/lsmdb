@@ -5,13 +5,16 @@
 //
 //	go run scripts/bench_compare.go run \
 //	    -arm base=bd67696+<item1>,<item2> -arm tip=HEAD \
-//	    -clients 1,2,4,8,16 -repetitions 5 -- -warmup 5s -duration 30s
+//	    -clients 1,2,4,8,16 -repetitions 5 -machine-type <type> -disk-type <type> \
+//	    -- -official -warmup 5s -duration 30s
 //	go run scripts/bench_compare.go summarize <combined.json>
 //
 // Each arm is built in its own detached git worktree from committed revisions
 // only; uncommitted changes in the main checkout are never included. A
 // cherry-pick conflict aborts the run without resolving anything. Worktrees
-// are removed on exit; per-run reports stay in the work directory.
+// are removed on exit; per-run reports stay in the work directory. The machine
+// and disk type are recorded by the driver, not passed to the arms, whose
+// clusterbench binaries may predate those flags.
 package main
 
 import (
@@ -55,7 +58,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: go run scripts/bench_compare.go run -arm name=rev[+pick,...] ... [-clients 1,4] [-repetitions 5] [-out file] [-work dir] [-- clusterbench flags]")
+	fmt.Fprintln(os.Stderr, "usage: go run scripts/bench_compare.go run -arm name=rev[+pick,...] ... [-clients 1,4] [-repetitions 5] [-out file] [-work dir] [-machine-type t -disk-type t] [-- clusterbench flags]")
 	fmt.Fprintln(os.Stderr, "       go run scripts/bench_compare.go summarize <combined.json>")
 	os.Exit(2)
 }
@@ -65,6 +68,8 @@ type runOptions struct {
 	clients     []int
 	repetitions int
 	out, work   string
+	machineType string
+	diskType    string
 	extra       []string
 }
 
@@ -80,11 +85,16 @@ func parseRunFlags(args []string) (runOptions, error) {
 	flags.IntVar(&opts.repetitions, "repetitions", 5, "interleaved repetitions per arm and client count")
 	flags.StringVar(&opts.out, "out", "", "combined result file to create (never overwritten); default <date>-<sha>-compare.json in the OS temp dir")
 	flags.StringVar(&opts.work, "work", "", "work directory for worktrees, binaries and per-run reports; default a new OS temp dir")
+	flags.StringVar(&opts.machineType, "machine-type", "", "machine or instance type, recorded in the combined file; required with -official")
+	flags.StringVar(&opts.diskType, "disk-type", "", "disk under the clusterbench -data-dir, recorded in the combined file; required with -official")
 	if err := flags.Parse(args); err != nil {
 		return runOptions{}, err
 	}
 	opts.extra = flags.Args()
 	if err := benchcompare.ValidateExtraArgs(opts.extra); err != nil {
+		return runOptions{}, err
+	}
+	if err := benchcompare.RequireMachineLabels(opts.extra, opts.machineType, opts.diskType); err != nil {
 		return runOptions{}, err
 	}
 	if len(opts.arms) < 2 {
@@ -138,6 +148,7 @@ func runCommand(ctx context.Context, args []string) error {
 	combined := benchcompare.Combined{
 		SchemaVersion: benchcompare.SchemaVersion, Clients: opts.clients,
 		Repetitions: opts.repetitions, ExtraArgs: append([]string{}, opts.extra...),
+		MachineType: opts.machineType, DiskType: opts.diskType,
 	}
 	binaries := map[string]string{}
 	worktrees := map[string]string{}

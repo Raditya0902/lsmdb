@@ -43,6 +43,8 @@ func parseFlags(args []string) (options, error) {
 	flags.BoolVar(&opts.official, "official", false, "label the run official (Linux only); otherwise it is a secondary smoke run")
 	flags.StringVar(&opts.out, "out", "", "result file to create (never overwritten); default <dir>/<date>-<sha>-cluster.json in benchmarks/results for official runs, the OS temp dir otherwise")
 	flags.StringVar(&opts.dataDir, "data-dir", "", "parent directory for node data; default the OS temp dir")
+	flags.StringVar(&opts.machineType, "machine-type", "", "machine or instance type, e.g. n2-standard-8; required with -official")
+	flags.StringVar(&opts.diskType, "disk-type", "", "disk under -data-dir, e.g. local NVMe or pd-ssd; required with -official")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -59,6 +61,9 @@ func parseFlags(args []string) (options, error) {
 	if opts.mode != modeThroughput && opts.mode != modeFailover {
 		return options{}, fmt.Errorf("invalid -mode %q: want %s or %s", opts.mode, modeThroughput, modeFailover)
 	}
+	if opts.official && (strings.TrimSpace(opts.machineType) == "" || strings.TrimSpace(opts.diskType) == "") {
+		return options{}, errors.New("-official requires -machine-type and -disk-type")
+	}
 	if opts.dataDir == "" {
 		opts.dataDir = os.TempDir()
 	}
@@ -70,10 +75,7 @@ func run(opts options) error {
 	if err != nil {
 		return err
 	}
-	report := Report{
-		SchemaVersion: schemaVersion, Label: label, Environment: benchenv.Collect(opts.dataDir),
-		Config: buildConfig(opts), Limitations: limitationsFor(opts.mode),
-	}
+	report := newReport(opts, label)
 	out, err := createOutput(opts.out, label, report.Environment.GitSHA)
 	if err != nil {
 		return err
@@ -104,6 +106,14 @@ func run(opts options) error {
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(report)
+}
+
+// newReport starts the report for one invocation, before any run.
+func newReport(opts options, label string) Report {
+	return Report{
+		SchemaVersion: schemaVersion, Label: label, MachineType: opts.machineType, DiskType: opts.diskType,
+		Environment: benchenv.Collect(opts.dataDir), Config: buildConfig(opts), Limitations: limitationsFor(opts.mode),
+	}
 }
 
 // createOutput opens the result file exclusively so no earlier result is lost.

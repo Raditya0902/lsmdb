@@ -81,6 +81,40 @@ type Message struct {
 	RejectHint   uint64
 	Context      uint64
 	Snapshot     *Snapshot
+	// Origin records which code path emitted an append, for instrumentation
+	// only. It is never serialized and consensus logic never reads it.
+	Origin MessageOrigin
+}
+
+// MessageOrigin labels the code path that emitted an append message.
+type MessageOrigin uint8
+
+const (
+	// OriginOther covers elections, read probes, membership, and snapshot replies.
+	OriginOther MessageOrigin = iota
+	// OriginHeartbeat is the periodic leader broadcast from Tick.
+	OriginHeartbeat
+	// OriginProposal is the broadcast that follows a client proposal.
+	OriginProposal
+	// OriginCommitAdvance is the broadcast made when the leader's commit index advances.
+	OriginCommitAdvance
+	// OriginAckResend is any append sent directly in reply to an append response.
+	OriginAckResend
+)
+
+func (o MessageOrigin) String() string {
+	switch o {
+	case OriginHeartbeat:
+		return "heartbeat"
+	case OriginProposal:
+		return "proposal"
+	case OriginCommitAdvance:
+		return "commit_advance"
+	case OriginAckResend:
+		return "ack_resend"
+	default:
+		return "other"
+	}
 }
 
 // Update describes effects produced by one deterministic state transition.

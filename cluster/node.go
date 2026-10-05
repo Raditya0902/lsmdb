@@ -180,7 +180,8 @@ func StartNode(config NodeConfig) (*Node, error) {
 	metrics := newNodeMetrics(config.ID)
 	observed := &observedTransport{inner: transport, metrics: metrics}
 	runtime, err := raftnode.Start(
-		raftnode.Config{TickInterval: config.TickInterval, SnapshotThreshold: config.SnapshotThreshold}, core, store, observed, machine,
+		raftnode.Config{TickInterval: config.TickInterval, SnapshotThreshold: config.SnapshotThreshold}, core,
+		&observedStore{inner: store, metrics: metrics}, observed, &observedMachine{inner: machine, metrics: metrics},
 	)
 	if err != nil {
 		_ = listener.Close()
@@ -212,6 +213,11 @@ func StartNode(config NodeConfig) (*Node, error) {
 	go func() { _ = node.server.Serve(listener) }()
 	return node, nil
 }
+
+// MetricSnapshot reads every metric in this node's registry, keyed as
+// name{label=value,...} without the node_id label; histograms appear as
+// name_sum and name_count.
+func (n *Node) MetricSnapshot() (map[string]float64, error) { return n.metrics.snapshot() }
 
 // Address returns the actual bound address, useful when configured with port zero.
 func (n *Node) Address() string { return n.listener.Addr().String() }

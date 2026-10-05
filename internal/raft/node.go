@@ -98,7 +98,7 @@ func (n *Node) Tick() Update {
 		n.quorumElapsed++
 		if n.heartbeatElapsed >= n.cfg.HeartbeatTicks {
 			n.heartbeatElapsed = 0
-			update.Messages = append(update.Messages, n.broadcastAppend()...)
+			update.Messages = append(update.Messages, n.broadcastAppend(OriginHeartbeat)...)
 		}
 		if n.quorumElapsed >= n.cfg.CheckQuorumTicks {
 			n.quorumElapsed = 0
@@ -227,7 +227,7 @@ func (n *Node) ProposeMembership(voters []uint64) (uint64, Update, error) {
 	n.matchIndex[n.cfg.ID] = entry.Index
 	n.nextIndex[n.cfg.ID] = entry.Index + 1
 	update := Update{Entries: []Entry{cloneEntry(entry)}}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginOther)...)
 	update.merge(n.maybeCommit())
 	return entry.Index + 1, update, nil
 }
@@ -251,7 +251,7 @@ func (n *Node) Propose(data []byte) (uint64, Update, error) {
 	n.matchIndex[n.cfg.ID] = entry.Index
 	n.nextIndex[n.cfg.ID] = entry.Index + 1
 	update := Update{Entries: []Entry{cloneEntry(entry)}}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginProposal)...)
 	update.merge(n.maybeCommit())
 	return entry.Index, update, nil
 }
@@ -267,7 +267,7 @@ func (n *Node) ReadProbe(context uint64) (Update, error) {
 	update := Update{}
 	for _, peer := range n.peers() {
 		if peer != n.cfg.ID {
-			update.Messages = append(update.Messages, n.appendMessage(peer, context))
+			update.Messages = append(update.Messages, n.appendMessage(peer, context, OriginOther))
 		}
 	}
 	return update, nil
@@ -371,7 +371,7 @@ func (n *Node) becomeLeader() Update {
 	n.matchIndex[n.cfg.ID] = noop.Index
 	n.nextIndex[n.cfg.ID] = noop.Index + 1
 	update := Update{Entries: []Entry{noop}, RoleChanged: true}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginOther)...)
 	update.merge(n.maybeCommit())
 	return update
 }
@@ -595,7 +595,7 @@ func (n *Node) handleSnapshotResponse(message Message) Update {
 	}
 	n.recentActive[message.From] = true
 	if message.Reject {
-		return Update{Messages: []Message{n.appendMessage(message.From, 0)}}
+		return Update{Messages: []Message{n.appendMessage(message.From, 0, OriginOther)}}
 	}
 	matched := min(message.LogIndex, n.lastIndex())
 	if matched > n.matchIndex[message.From] {
@@ -604,7 +604,7 @@ func (n *Node) handleSnapshotResponse(message Message) Update {
 	}
 	update := n.maybeCommit()
 	if n.nextIndex[message.From] <= n.lastIndex() {
-		update.Messages = append(update.Messages, n.appendMessage(message.From, 0))
+		update.Messages = append(update.Messages, n.appendMessage(message.From, 0, OriginOther))
 	}
 	return update
 }
@@ -622,7 +622,7 @@ func (n *Node) handleAppendResponse(message Message) Update {
 			next--
 		}
 		n.nextIndex[message.From] = max(1, next)
-		return Update{Messages: []Message{n.appendMessage(message.From, message.Context)}}
+		return Update{Messages: []Message{n.appendMessage(message.From, message.Context, OriginAckResend)}}
 	}
 	if message.LogIndex > n.matchIndex[message.From] {
 		matched := min(message.LogIndex, n.lastIndex())
@@ -631,7 +631,7 @@ func (n *Node) handleAppendResponse(message Message) Update {
 	}
 	update := n.maybeCommit()
 	if n.nextIndex[message.From] <= n.lastIndex() {
-		update.Messages = append(update.Messages, n.appendMessage(message.From, message.Context))
+		update.Messages = append(update.Messages, n.appendMessage(message.From, message.Context, OriginAckResend))
 	}
 	return update
 }
@@ -660,38 +660,38 @@ func (n *Node) maybeCommit() Update {
 		n.nextIndex[n.cfg.ID] = final.Index + 1
 		update.Entries = append(update.Entries, cloneEntry(final))
 	}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginCommitAdvance)...)
 	if n.membership.Index <= n.commit && !n.isVoter(n.cfg.ID) {
 		update.merge(n.becomeFollower(n.term, 0))
 	}
 	return update
 }
 
-func (n *Node) broadcastAppend() []Message {
+func (n *Node) broadcastAppend(origin MessageOrigin) []Message {
 	peers := n.replicationPeers()
 	messages := make([]Message, 0, len(peers)-1)
 	for _, peer := range peers {
 		if peer != n.cfg.ID {
-			messages = append(messages, n.appendMessage(peer, 0))
+			messages = append(messages, n.appendMessage(peer, 0, origin))
 		}
 	}
 	return messages
 }
 
-func (n *Node) appendMessage(peer, context uint64) Message {
+func (n *Node) appendMessage(peer, context uint64, origin MessageOrigin) Message {
 	next := n.nextIndex[peer]
 	if next == 0 {
 		next = n.lastIndex() + 1
 	}
 	if next <= n.snapshot.Index {
 		snapshot := cloneSnapshot(n.snapshot)
-		return Message{Type: MsgSnapshot, From: n.cfg.ID, To: peer, Term: n.term, Snapshot: &snapshot}
+		return Message{Type: MsgSnapshot, From: n.cfg.ID, To: peer, Term: n.term, Snapshot: &snapshot, Origin: origin}
 	}
 	return Message{
 		Type: MsgAppend, From: n.cfg.ID, To: peer, Term: n.term,
 		LogIndex: next - 1, LogTerm: n.termAt(next - 1),
 		Entries: n.entriesBetween(next, n.lastIndex()+1), LeaderCommit: n.commit,
-		Context: context,
+		Context: context, Origin: origin,
 	}
 }
 

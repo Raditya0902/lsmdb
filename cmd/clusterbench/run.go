@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -63,13 +64,15 @@ func runOnce(opts options, clients, repetition int) (RunResult, error) {
 	time.Sleep(opts.warmup)
 	windowStart := time.Now()
 	startStatus, startErr := statusAll(nodes)
+	startCounters, startCountersErr := metricSnapshots(nodes)
 	time.Sleep(opts.duration)
 	windowEnd := time.Now()
 	endStatus, endErr := statusAll(nodes)
+	endCounters, endCountersErr := metricSnapshots(nodes)
 	stopClients()
 	group.Wait()
-	if startErr != nil || endErr != nil {
-		return result, fmt.Errorf("read window status: %v %v", startErr, endErr)
+	if err := errors.Join(startErr, endErr, startCountersErr, endCountersErr); err != nil {
+		return result, fmt.Errorf("read window boundaries: %w", err)
 	}
 
 	var ops []opRecord
@@ -85,6 +88,7 @@ func runOnce(opts options, clients, repetition int) (RunResult, error) {
 	result.Valid, result.InvalidReason = validity(result.TermsStart, result.TermsEnd)
 	result.ElectionsInWindow = maxOf(result.TermsEnd) - min(maxOf(result.TermsStart), maxOf(result.TermsEnd))
 	result.CommittedEntries = maxCommit(endStatus) - min(maxCommit(startStatus), maxCommit(endStatus))
+	result.Counters = counterDeltas(startCounters, endCounters, result.CommittedEntries)
 
 	if result.FsyncAfter, err = benchenv.MeasureFsync(base, fsyncProbeSamples); err != nil {
 		return result, err
@@ -207,6 +211,18 @@ func statusAll(nodes []*cluster.Node) ([]raft.Status, error) {
 		statuses = append(statuses, status)
 	}
 	return statuses, nil
+}
+
+func metricSnapshots(nodes []*cluster.Node) ([]map[string]float64, error) {
+	snapshots := make([]map[string]float64, 0, len(nodes))
+	for _, node := range nodes {
+		values, err := node.MetricSnapshot()
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, values)
+	}
+	return snapshots, nil
 }
 
 func terms(statuses []raft.Status) []uint64 {

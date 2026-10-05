@@ -85,6 +85,7 @@ type RunResult struct {
 	CommittedEntries  uint64              `json:"committed_entries"`
 	FsyncBefore       benchenv.FsyncStats `json:"fsync_before"`
 	FsyncAfter        benchenv.FsyncStats `json:"fsync_after"`
+	Counters          Counters            `json:"counters"`
 }
 
 // Report is the complete JSON output of one clusterbench invocation.

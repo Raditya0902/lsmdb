@@ -5,10 +5,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"lsmdb/internal/raft"
-	"lsmdb/internal/raftgrpc"
+	"lsmdb/internal/raftnode"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -33,6 +34,12 @@ type nodeMetrics struct {
 	transportFailures *prometheus.CounterVec
 	rpcRequests       *prometheus.CounterVec
 	rpcDuration       *prometheus.HistogramVec
+	logSyncs          prometheus.Counter
+	logSyncEntries    prometheus.Counter
+	hardStateSyncs    prometheus.Counter
+	appendMessages    *prometheus.CounterVec
+	applySeconds      prometheus.Histogram
+	snapshotSeconds   prometheus.Histogram
 }
 
 func newNodeMetrics(nodeID uint64) *nodeMetrics {
@@ -54,13 +61,58 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		transportFailures: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_transport_failures_total", Help: "Failed outbound Raft RPCs.", ConstLabels: constant}, []string{"peer_id"}),
 		rpcRequests:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_grpc_requests_total", Help: "gRPC requests by method and status.", ConstLabels: constant}, []string{"method", "code"}),
 		rpcDuration:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "lsmdb_grpc_request_duration_seconds", Help: "gRPC request latency.", ConstLabels: constant, Buckets: prometheus.DefBuckets}, []string{"method"}),
+		logSyncs:          prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_syncs_total", Help: "Raft log append syncs: successful persists carrying at least one entry.", ConstLabels: constant}),
+		logSyncEntries:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_sync_entries_total", Help: "Log entries written by Raft log append syncs.", ConstLabels: constant}),
+		hardStateSyncs:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_hardstate_syncs_total", Help: "Successful persists carrying a term or vote change.", ConstLabels: constant}),
+		appendMessages:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_append_messages_total", Help: "AppendEntries messages handed to the transport, by emitting code path.", ConstLabels: constant}, []string{"origin"}),
+		applySeconds:      prometheus.NewHistogram(prometheus.HistogramOpts{Name: "lsmdb_raft_apply_seconds", Help: "Time per committed-entry state-machine apply.", ConstLabels: constant, Buckets: prometheus.ExponentialBuckets(1e-6, 4, 12)}),
+		snapshotSeconds:   prometheus.NewHistogram(prometheus.HistogramOpts{Name: "lsmdb_raft_snapshot_seconds", Help: "Time per durable Raft snapshot persist (creation or install).", ConstLabels: constant, Buckets: prometheus.ExponentialBuckets(1e-3, 2, 16)}),
+	}
+	for _, origin := range []raft.MessageOrigin{raft.OriginOther, raft.OriginHeartbeat, raft.OriginProposal, raft.OriginCommitAdvance, raft.OriginAckResend} {
+		m.appendMessages.WithLabelValues(origin.String())
 	}
 	m.registry.MustRegister(
 		m.role, m.term, m.leader, m.commit, m.applied, m.logLength, m.snapshotIndex, m.replicationLag,
 		m.elections, m.leadershipChanges, m.quorumLoss, m.proposals,
 		m.transportFailures, m.rpcRequests, m.rpcDuration,
+		m.logSyncs, m.logSyncEntries, m.hardStateSyncs, m.appendMessages, m.applySeconds, m.snapshotSeconds,
 	)
 	return m
+}
+
+// snapshot flattens the registry into name{label=value,...} keys, omitting the
+// node_id constant label. Histograms appear as name_sum and name_count.
+func (m *nodeMetrics) snapshot() (map[string]float64, error) {
+	families, err := m.registry.Gather()
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]float64)
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			var labels []string
+			for _, label := range metric.GetLabel() {
+				if label.GetName() != "node_id" {
+					labels = append(labels, label.GetName()+"="+label.GetValue())
+				}
+			}
+			suffix := ""
+			if len(labels) > 0 {
+				suffix = "{" + strings.Join(labels, ",") + "}"
+			}
+			name := family.GetName()
+			switch {
+			case metric.GetCounter() != nil:
+				values[name+suffix] = metric.GetCounter().GetValue()
+			case metric.GetGauge() != nil:
+				values[name+suffix] = metric.GetGauge().GetValue()
+			case metric.GetHistogram() != nil:
+				values[name+"_sum"+suffix] = metric.GetHistogram().GetSampleSum()
+				values[name+"_count"+suffix] = float64(metric.GetHistogram().GetSampleCount())
+			}
+		}
+	}
+	return values, nil
 }
 
 func (m *nodeMetrics) unaryInterceptor(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -121,11 +173,14 @@ func (m *nodeMetrics) observeStatus(previous, current raft.Status, applied uint6
 }
 
 type observedTransport struct {
-	inner   *raftgrpc.Transport
+	inner   raftnode.Transport
 	metrics *nodeMetrics
 }
 
 func (t *observedTransport) Send(ctx context.Context, message raft.Message) error {
+	if message.Type == raft.MsgAppend {
+		t.metrics.appendMessages.WithLabelValues(message.Origin.String()).Inc()
+	}
 	err := t.inner.Send(ctx, message)
 	if err != nil {
 		t.metrics.transportFailures.WithLabelValues(strconv.FormatUint(message.To, 10)).Inc()
@@ -140,3 +195,69 @@ func (t *observedTransport) SendSnapshot(ctx context.Context, message raft.Messa
 	}
 	return err
 }
+
+// observedStore counts Raft persistence effects. raftstore.Store.append issues
+// exactly one raft.log fsync per persist that carries entries.
+type observedStore struct {
+	inner   raftnode.StableStore
+	metrics *nodeMetrics
+}
+
+func (s *observedStore) Persist(update raft.Update) error {
+	err := s.inner.Persist(update)
+	if err == nil {
+		s.count(update)
+	}
+	return err
+}
+
+func (s *observedStore) PersistSnapshot(update raft.Update, writeData func(io.Writer) error) error {
+	start := time.Now()
+	err := s.inner.PersistSnapshot(update, writeData)
+	if err == nil {
+		s.metrics.snapshotSeconds.Observe(time.Since(start).Seconds())
+		s.count(update)
+	}
+	return err
+}
+
+func (s *observedStore) count(update raft.Update) {
+	if len(update.Entries) > 0 {
+		s.metrics.logSyncs.Inc()
+		s.metrics.logSyncEntries.Add(float64(len(update.Entries)))
+	}
+	if update.HardState != nil {
+		s.metrics.hardStateSyncs.Inc()
+	}
+}
+
+func (s *observedStore) OpenSnapshot(index uint64) (io.ReadCloser, uint64, uint32, error) {
+	return s.inner.OpenSnapshot(index)
+}
+
+func (s *observedStore) Close() error { return s.inner.Close() }
+
+// observedMachine times committed-entry application.
+type observedMachine struct {
+	inner   raftnode.StateMachine
+	metrics *nodeMetrics
+}
+
+func (m *observedMachine) Apply(index uint64, command []byte) error {
+	start := time.Now()
+	err := m.inner.Apply(index, command)
+	m.metrics.applySeconds.Observe(time.Since(start).Seconds())
+	return err
+}
+
+func (m *observedMachine) AppliedIndex() uint64 { return m.inner.AppliedIndex() }
+
+func (m *observedMachine) WriteSnapshot(writer io.Writer) (uint64, error) {
+	return m.inner.WriteSnapshot(writer)
+}
+
+func (m *observedMachine) RestoreSnapshot(index uint64, size uint64, reader io.Reader) error {
+	return m.inner.RestoreSnapshot(index, size, reader)
+}
+
+func (m *observedMachine) Close() error { return m.inner.Close() }

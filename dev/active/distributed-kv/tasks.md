@@ -1,10 +1,13 @@
 # Distributed KV Cluster: Task Tracker
 
-Last updated: 2026-08-27
+Last updated: 2026-10-05
 
 ## Current Phase
 
-The v1.0.0 release is complete and verified.
+Phase 11 (correctness fixes A1, A2, A4, A5 from
+`dev/active/analysis-report.md`) is complete on branch `phase-11-correctness-fixes`
+and awaiting review. Phase 10 (benchmark harness v2) is next. Phase details:
+`dev/active/phase-11-correctness-fixes/`.
 
 ## Completed
 
@@ -120,6 +123,17 @@ None.
 - [x] Add cluster throughput/latency/failover benchmark.
 - [x] Update README and design documentation with measured evidence.
 
+## Phase 11 — Correctness Fixes
+
+- [x] A4: followers commit only through entries the leader verified (`f2fb1e6`).
+- [x] A1: embedded sequence numbers monotonic across reopen; manifest version 2
+  with `last_seq` and legacy upgrade (D016) (`648bda8`).
+- [x] A2: pre-vote rejections carry the responder's term (D017) (`c4f8c3a`); direct
+  grant-counting and persist-order tests (`dba010f`).
+- [x] A5: `ChangeMembership` completes when its configuration commits (`4d51087`).
+- [x] Reopen property test at 500 operations per seed by default; long mode via
+  `LSMDB_LONG_TESTS=1`; skipped under `-short` (`e656571`).
+
 ## Verification Log
 
 - 2026-08-26 — pre-change `go test ./...` — PASS.
@@ -190,6 +204,19 @@ None.
 - 2026-08-27 — post-documentation `go test ./...` — PASS.
 - 2026-08-27 — post-documentation `go vet ./...` — PASS.
 - 2026-08-27 — post-documentation default and five-node Compose configuration — PASS.
+- 2026-10-05 — phase 11: each fix's new tests FAIL on the unmodified code and PASS
+  after the fix. Guard tests fail under deliberate mutations. Details in
+  `dev/active/phase-11-correctness-fixes/tasks.md`.
+- 2026-10-05 — phase 11 after every commit: gofmt (changed files), `go vet ./...`,
+  `go test ./...`, `go test -race ./...` — PASS.
+- 2026-10-05 — phase 11: the reopen property test (500 operations) FAILS on all four
+  seeds at `f2fb1e6` (steps 58, 318, 116, 86) and PASSES after A1.
+- 2026-10-05 — phase 11: a binary built from `bd67696` rejects a version-2 manifest
+  with `manifest version 2 is unsupported`.
+- 2026-10-05 — phase 11: cluster restart, snapshot-install and membership tests under
+  `-race` — PASS.
+- 2026-10-05 — phase 11: clusterbench at 1 and 4 clients, main vs branch,
+  interleaved — no regression. This was a sanity check, not a benchmark result.
 
 ## Blockers
 
@@ -198,4 +225,5 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-None for v1.0.0. Optional stale follower reads remain deferred.
+Phase 10: benchmark harness v2 and baseline (`dev/active/phase-10-benchmark-harness-v2/`).
+Optional stale follower reads remain deferred.

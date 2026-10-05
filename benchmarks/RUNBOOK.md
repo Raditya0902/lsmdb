@@ -12,11 +12,14 @@ are smoke tests and must not be quoted as results.
 | `cmd/clusterbench` | Replicated writes on fresh in-process 3-node clusters: throughput, latency, Raft counters | `<date>-<sha12>-cluster.json` |
 | `scripts/bench_compare.go` | Runs `clusterbench` on several git revisions, interleaved, and merges the results | `<date>-<sha12>-compare.json` |
 | `cmd/bench` | Embedded LSM vs SQLite workloads | `<date>-<sha12>-embedded.json` |
+| `scripts/vm_smoke_check.go` | Checks a `clusterbench` or `bench_compare` file before its numbers are used (section 5) | PASS/FAIL per check, a table of runs, exit 1 on any FAIL |
+| `scripts/sweep_table.go` | Reads result files with different `-duration` values (section 3d) | One row per run: duration, ops/s, appends per entry, ack_resend share |
 
-The tools have these properties:
+`vm_smoke_check.go` and `sweep_table.go` only read result files. The three tools
+that write them have these properties:
 - They never overwrite a file. A name collision gets `-2`, `-3`, and so on.
 - Secondary runs write to the OS temp dir. Official runs write to `benchmarks/results/`.
-- Neither tool writes `results.json` unless that path is passed with `-out` and does
+- None of them writes `results.json` unless that path is passed with `-out` and does
   not exist yet.
 
 ## 1. Provision the VM
@@ -33,20 +36,36 @@ them. Their fsync latency dominates every cluster number.
 sudo apt-get update && sudo apt-get install -y git build-essential   # cgo for go-sqlite3
 # Install a Go release at or above the go line in go.mod, from https://go.dev/dl/
 go version
+```
 
-git clone https://github.com/Raditya0902/lsmdb.git && cd lsmdb
+The VM needs the branch and every comparison commit. Carry them as a bundle of
+the branch's full history, which needs no access to the remote. On the
+development machine:
+
+```bash
+B=~/lsmdb-transfer/lsmdb-phase10-$(git rev-parse --short HEAD).bundle
+mkdir -p ~/lsmdb-transfer && git bundle create "$B" phase-10-benchmark-harness-v2
+git bundle verify "$B"   # must say "The bundle records a complete history"
+shasum -a 256 "$B"       # note the hash
+scp "$B" <vm>:
+```
+
+On the VM, check the hash before using the bundle. `git bundle verify` needs a
+repository, so it runs inside the clone.
+
+```bash
+B=~/lsmdb-phase10-<sha>.bundle
+sha256sum "$B"           # must equal the hash from the development machine
+git bundle list-heads "$B"
+git clone -b phase-10-benchmark-harness-v2 "$B" lsmdb && cd lsmdb
+git bundle verify "$B"
 git config user.name "bench" && git config user.email "bench@localhost"  # cherry-pick needs an identity
-git fetch origin phase-10-benchmark-harness-v2 && git checkout phase-10-benchmark-harness-v2
+git log --oneline -1     # must be the tip that list-heads printed
 go test ./...
 ```
 
-The comparison commits must be reachable from the VM's clone. If the branch is not
-on the remote yet, carry it over with a bundle from the development machine:
-
-```bash
-git bundle create phase10.bundle origin/main..phase-10-benchmark-harness-v2  # dev machine
-git fetch /path/to/phase10.bundle phase-10-benchmark-harness-v2:phase-10-benchmark-harness-v2  # VM
-```
+Once the branch is pushed, a clone of the remote works instead:
+`git clone https://github.com/Raditya0902/lsmdb.git lsmdb && cd lsmdb && git checkout phase-10-benchmark-harness-v2`.
 
 Pick one directory on the target disk for all benchmark data. The commands below
 call it `$BENCH`.

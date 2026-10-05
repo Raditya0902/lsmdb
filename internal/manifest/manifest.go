@@ -12,17 +12,28 @@ import (
 
 const (
 	fileName = "MANIFEST"
-	version  = 1
+	// version 2 added LastSeq. Version 1 manifests remain readable so embedded
+	// databases written before it can be upgraded on open.
+	version       = 2
+	legacyVersion = 1
 )
 
 // State is the durable description of a database generation. SSTables are
 // ordered oldest to newest. AppliedIndex is only used by replica mode.
+// LastSeq is the highest sequence number allocated to any record in the
+// published SSTables; it is only used by embedded mode and is zero in legacy
+// version 1 manifests.
 type State struct {
 	Version      int      `json:"version"`
 	SSTables     []string `json:"sstables"`
 	NextSST      uint64   `json:"next_sst"`
 	AppliedIndex uint64   `json:"applied_index,omitempty"`
+	LastSeq      uint64   `json:"last_seq"`
 }
+
+// Legacy reports whether the state was loaded from a version 1 manifest, which
+// does not record LastSeq.
+func (s State) Legacy() bool { return s.Version == legacyVersion }
 
 // New returns an empty manifest at the current format version.
 func New() State { return State{Version: version} }
@@ -103,7 +114,7 @@ func Store(dir string, state State) error {
 // Validate rejects paths that could escape the DB directory and malformed
 // generations before any files are opened or published.
 func (s State) Validate() error {
-	if s.Version != version {
+	if s.Version != version && s.Version != legacyVersion {
 		return fmt.Errorf("manifest version %d is unsupported", s.Version)
 	}
 	seen := make(map[string]struct{}, len(s.SSTables))

@@ -47,10 +47,19 @@ but before step 3, the WAL record survives and is replayed on the next `Open`. I
 crashes during step 2 (partial write), `ReadAll` detects the truncated record via CRC
 and drops it.
 
-**Sequence numbers** are monotonically increasing across the lifetime of the database.
-`NewWithSeq(old.NextSeq())` ensures the post-flush MemTable continues the same counter,
-so WAL records written after a flush always carry higher sequence numbers than any
-SSTable record. This makes "newer seqNum wins" globally correct.
+**Sequence numbers** are monotonically increasing across the lifetime of the database,
+including restarts. Within a process, `NewWithSeq(old.NextSeq())` makes the post-flush
+MemTable continue the same counter. Across restarts, the manifest carries the counter.
+
+A flush empties the WAL, so after a restart the WAL alone cannot say which sequence
+numbers SSTables already use. Before manifest version 2, a reopened database restarted
+at 1. A newer write then lost to older SSTable data in `Scan` and compaction, which both
+resolve by sequence number.
+
+Every embedded flush therefore publishes `LastSeq`, the highest sequence number in the
+published SSTables, and `Open` resumes at `max(LastSeq, highest WAL sequence) + 1`.
+WAL records written after a flush always carry higher sequence numbers than any SSTable
+record, which makes "newer seqNum wins" globally correct.
 
 **WAL rotation** occurs after each successful SSTable flush: `wal.Reset()` truncates
 the WAL file to zero. On reopen, WAL replay only reconstructs writes since the last
@@ -208,10 +217,14 @@ in this merge.
 ```
 1. Write merged SSTable to nextSST path (fully fsynced)
 2. Open the replacement reader
-3. Atomically publish a MANIFEST containing only the replacement
+3. Atomically publish a MANIFEST containing only the replacement (LastSeq unchanged)
 4. Replace db.readers with the new reader
 5. Close and remove files from the old manifest generation
 ```
+
+Compaction carries `LastSeq` forward instead of recomputing it. A bottom-level merge
+can drop the highest-sequence record (a tombstone), and the counter must never move
+backwards.
 
 If the process crashes before step 3, recovery uses the old manifest and ignores the
 unpublished output. If it crashes after step 3, recovery uses the replacement and
@@ -225,12 +238,19 @@ scan after the initial migration of a pre-manifest database.
 On embedded `Open(path, opts)`:
 
 1. Load the published manifest and open its SSTables newest-first. If an older
-   database has no manifest, bootstrap one from its existing files once.
-2. Replay the WAL: `ReadAll` reads every record, skipping truncated trailing records
+   database has no manifest, build its file set from the existing files.
+2. Determine `LastSeq`: read it from a version-2 manifest, or derive it once from the
+   highest sequence in the live SSTables for a legacy (version-1 or pre-manifest)
+   database.
+3. Replay the WAL: `ReadAll` reads every record, skipping truncated trailing records
    and records with bad CRCs. After replay, the WAL is truncated to the last valid
-   record boundary.
-3. Apply WAL records to the MemTable via `SetRaw`, which honours sequence numbers:
+   record boundary. Records at or below `LastSeq` are already in SSTables and are
+   skipped. They reappear only when the WAL truncate after a flush, which is not
+   synced, was lost.
+4. Apply WAL records to the MemTable via `SetRaw`, which honours sequence numbers:
    a later WAL record for the same key overwrites an earlier one.
+5. For a legacy database, publish a version-2 manifest before `Open` returns (see
+   below).
 
 **CRC truncation behaviour in detail.** The WAL record header is 17 bytes
 (`type(1) | seq(8) | keyLen(4) | valLen(4)`). If `io.ReadFull` returns
@@ -239,9 +259,27 @@ boundary is lost — cannot safely skip). If a full record is read but its CRC d
 match, the record is skipped and reading continues at the next record (the boundary
 is known). After the loop, `Truncate(validEnd)` removes any trailing garbage.
 
-**Sequence number restoration.** WAL records carry their original `SeqNum`. `SetRaw`
-advances `nextSeq` to `max(nextSeq, r.SeqNum+1)` when replaying. After replay, the
-MemTable's counter is exactly where it was before the crash.
+**Sequence number restoration.** The MemTable counter starts at `LastSeq + 1`.
+WAL records carry their original `SeqNum`, and `SetRaw` advances `nextSeq` to
+`max(nextSeq, r.SeqNum+1)` when replaying. After replay, the counter exceeds every
+sequence number stored in SSTables or the WAL.
+
+**Legacy manifest upgrade.** Manifest version 2 adds `last_seq`. `Load` accepts both
+versions and `Store` always writes version 2. A binary older than this format rejects
+version 2 with `manifest version 2 is unsupported`, so there is no downgrade.
+
+A legacy database whose WAL holds a record at or below the derived `LastSeq` was
+written while sequence numbers restarted on reopen. Its WAL records were acknowledged,
+so they are kept. They are renumbered above both the SSTable and WAL ranges in WAL
+order (the write order), then flushed. That flush publishes version 2 and only then
+resets the WAL:
+
+- A crash before that publish leaves the legacy manifest, and the upgrade reruns.
+- A crash after it leaves a WAL whose old numbers are all at or below the new
+  `LastSeq`, so they are skipped.
+
+A legacy database without that signature publishes version 2 with the derived
+`LastSeq` directly.
 
 ---
 
@@ -289,8 +327,9 @@ survives (or no version, if it was deleted). Space amplification is bounded by
 These rules are enforced throughout and must not be violated by any future change:
 
 1. **Newer sequence number always wins.**
-   SeqNums are assigned under `db.mu` before the WAL write, ensuring global
-   monotonicity. `SetRaw` and the K-way merge both use SeqNum to resolve conflicts.
+   SeqNums are assigned under `db.mu` before the WAL write, and a reopened database
+   resumes above the manifest's `LastSeq`, ensuring global monotonicity across
+   restarts. `SetRaw`, `Scan`, and the K-way merge all use SeqNum to resolve conflicts.
 
 2. **DELETE tombstone beats any older PUT for the same key.**
    A tombstone has a higher SeqNum than the PUT it shadows (it was written later).
@@ -406,6 +445,13 @@ linearizable read.
   for large datasets.
 - **No fsync per WAL append.** `Close()` fsyncs the WAL file. Between the last flush
   and a power failure, recent writes can be lost.
+- **Pre-version-2 sequence damage is not repaired.** SSTables written before manifest
+  version 2 may already hold a newer value with a lower sequence number than an older
+  one. This cannot be detected after the fact.
+
+  The legacy upgrade also cannot distinguish a WAL from a sequence-reuse write from a
+  WAL resurrected by a lost post-flush truncate. If a legacy database has both, the
+  resurrected records are renumbered as new writes.
 - **No distributed range scans.** Embedded range scans exist, but the network
   interface intentionally exposes only point operations in the MVP.
 - **No compression.** All bytes are stored verbatim.

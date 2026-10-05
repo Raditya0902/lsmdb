@@ -104,6 +104,57 @@ read or parse failures. The gRPC transport closes and recreates a cached
 connection when an ID resolves to a different address. Address changes therefore
 cannot add voters, change quorum arithmetic, or become committed state.
 
+### D016 — Embedded manifest records the last published sequence number
+
+Context: embedded `Open` rebuilt the sequence counter only from WAL records. A
+flush empties the WAL, so after flush → close → reopen, new writes received
+sequence numbers below data already in SSTables. `Scan` then returned the older
+value, and compaction permanently resurrected it. This violated DESIGN invariant 1
+("newer sequence number always wins"). Reproduced in phase 11 (finding A1).
+
+Decision: `MANIFEST` moves to version 2 and gains `last_seq`: the highest sequence
+number allocated to any record in the published SSTable generation.
+
+- Embedded flush sets it to the memtable's highest allocated sequence; compaction
+  carries it forward unchanged.
+- `Open` seeds the sequence counter with `max(last_seq, max WAL seq) + 1`.
+- For a version-2 manifest, WAL records with `seq <= last_seq` are skipped on replay.
+  They are already in SSTables and reappear only if the post-flush WAL truncate was not
+  durable.
+- Version-1 and pre-manifest databases are upgraded inside `Open`, before it returns:
+  1. Derive `last_seq` once from the maximum sequence in the live SSTables.
+  2. If a WAL record is at or below that value, the database was already affected by
+     the bug. Renumber every WAL record in WAL file order (the write order), starting
+     above both the SSTable maximum and the WAL maximum.
+  3. Flush. The flush writes the SSTable, publishes the version-2 manifest, and only
+     then resets the WAL.
+  4. Without that signature, publish version 2 with the derived `last_seq` directly.
+  - No version-2 manifest can coexist with a WAL containing acknowledged records it
+    would skip.
+  - Failpoint tests cover a crash before the publish (the upgrade reruns) and after it
+    (leftover WAL records keep their old numbers, all at or below `last_seq`, and are
+    skipped).
+
+Replica mode is unaffected. It never allocates sequence numbers: Raft indexes are
+supplied to `ApplyBatch`, and snapshot replacement resets the counter to
+`index + 1`. Its manifest becomes version 2 on the next publish, with `last_seq`
+unused.
+
+Consequences:
+
+- Binaries older than this change reject version-2 manifests, so there is no
+  downgrade. Verified against `bd67696`: `db.Open` on a version-2 database
+  returns `manifest version 2 is unsupported`.
+- Opening a legacy database scans its live SSTables once.
+- SSTables already written with out-of-order sequences before this fix cannot be
+  repaired in general; this is documented as a known limitation.
+- Known ambiguity: in a legacy database, a WAL resurrected by a lost post-flush
+  truncate (which is not synced) looks exactly like sequence reuse, because its
+  records sit at or below the SSTable maximum. Such records are renumbered as new
+  writes and can shadow newer SSTable data. This needs both a pre-version-2 lost
+  truncate and an upgrade from that state. Version-2 databases are not affected:
+  they skip such records by `last_seq`.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

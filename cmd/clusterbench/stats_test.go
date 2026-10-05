@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -136,31 +135,5 @@ func TestSameSeedProducesSameConfig(t *testing.T) {
 	}
 	if keyFor(0, newKeyRand(7, 0)) != keyFor(0, newKeyRand(7, 0)) || keyFor(0, newKeyRand(7, 0)) == keyFor(0, newKeyRand(8, 0)) {
 		t.Fatal("key sequence does not follow the seed")
-	}
-}
-
-func TestOfficialRequiresLinux(t *testing.T) {
-	cases := []struct {
-		goos     string
-		official bool
-		label    string
-		wantErr  bool
-	}{
-		{"linux", true, "official", false},
-		{"linux", false, "secondary", false},
-		{"darwin", false, "secondary", false},
-		{"darwin", true, "", true},
-	}
-	for _, tc := range cases {
-		label, err := runLabel(tc.goos, tc.official)
-		if (err != nil) != tc.wantErr || label != tc.label {
-			t.Errorf("runLabel(%s, %v) = (%q, %v), want (%q, error=%v)", tc.goos, tc.official, label, err, tc.label, tc.wantErr)
-		}
-	}
-	if dir := defaultOutputDir("secondary"); dir != os.TempDir() {
-		t.Errorf("secondary output dir = %q, want the OS temp dir", dir)
-	}
-	if dir := defaultOutputDir("official"); dir != "benchmarks/results" {
-		t.Errorf("official output dir = %q, want benchmarks/results", dir)
 	}
 }

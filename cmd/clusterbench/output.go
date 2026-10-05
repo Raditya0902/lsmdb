@@ -1,8 +1,6 @@
 package main
 
 import (
-	"errors"
-	"os"
 	"time"
 
 	"lsmdb/internal/benchenv"
@@ -104,23 +102,4 @@ var limitations = []string{
 	"Snapshot cost is excluded: the snapshot threshold keeps snapshots out of the window; it is measured separately.",
 	"All three nodes and the clients share one process, CPU, and disk; fsyncs from different nodes contend.",
 	"Clients are closed-loop, so latency under overload is subject to coordinated omission.",
-}
-
-// runLabel marks a run official only on Linux with an explicit request.
-func runLabel(goos string, official bool) (string, error) {
-	if !official {
-		return "secondary", nil
-	}
-	if goos != "linux" {
-		return "", errors.New("-official runs require Linux; runs on other systems are secondary smoke runs")
-	}
-	return "official", nil
-}
-
-// defaultOutputDir keeps secondary runs out of the repository.
-func defaultOutputDir(label string) string {
-	if label == "official" {
-		return "benchmarks/results"
-	}
-	return os.TempDir()
 }

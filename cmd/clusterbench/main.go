@@ -62,7 +62,7 @@ func parseFlags(args []string) (options, error) {
 }
 
 func run(opts options) error {
-	label, err := runLabel(runtime.GOOS, opts.official)
+	label, err := benchenv.RunLabel(runtime.GOOS, opts.official)
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func run(opts options) error {
 // createOutput opens the result file exclusively so no earlier result is lost.
 func createOutput(path, label, sha string) (*os.File, error) {
 	if path == "" {
-		return benchenv.CreateResultFile(defaultOutputDir(label), "cluster", sha, time.Now())
+		return benchenv.CreateResultFile(benchenv.DefaultOutputDir(label), "cluster", sha, time.Now())
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {

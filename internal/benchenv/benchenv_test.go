@@ -155,3 +155,29 @@ func TestEnvironmentContainsNoIdentifyingData(t *testing.T) {
 		t.Errorf("environment contains an absolute user path: %s", text)
 	}
 }
+
+func TestOfficialRequiresLinux(t *testing.T) {
+	cases := []struct {
+		goos     string
+		official bool
+		label    string
+		wantErr  bool
+	}{
+		{"linux", true, "official", false},
+		{"linux", false, "secondary", false},
+		{"darwin", false, "secondary", false},
+		{"darwin", true, "", true},
+	}
+	for _, tc := range cases {
+		label, err := RunLabel(tc.goos, tc.official)
+		if (err != nil) != tc.wantErr || label != tc.label {
+			t.Errorf("RunLabel(%s, %v) = (%q, %v), want (%q, error=%v)", tc.goos, tc.official, label, err, tc.label, tc.wantErr)
+		}
+	}
+	if dir := DefaultOutputDir("secondary"); dir != os.TempDir() {
+		t.Errorf("secondary output dir = %q, want the OS temp dir", dir)
+	}
+	if dir := DefaultOutputDir("official"); dir != "benchmarks/results" {
+		t.Errorf("official output dir = %q, want benchmarks/results", dir)
+	}
+}

@@ -288,6 +288,26 @@ func SortDurations(values []time.Duration) {
 // Milliseconds converts d to fractional milliseconds.
 func Milliseconds(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1e6 }
 
+// RunLabel marks a run official only on Linux with an explicit request; every
+// other run is a secondary smoke run.
+func RunLabel(goos string, official bool) (string, error) {
+	if !official {
+		return "secondary", nil
+	}
+	if goos != "linux" {
+		return "", errors.New("-official runs require Linux; runs on other systems are secondary smoke runs")
+	}
+	return "official", nil
+}
+
+// DefaultOutputDir keeps secondary runs out of the repository.
+func DefaultOutputDir(label string) string {
+	if label == "official" {
+		return "benchmarks/results"
+	}
+	return os.TempDir()
+}
+
 // CreateResultFile creates <dir>/<date>-<sha12>-<kind>.json exclusively,
 // appending -2, -3, ... when a file with that name already exists.
 func CreateResultFile(dir, kind, sha string, now time.Time) (*os.File, error) {

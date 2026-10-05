@@ -397,17 +397,29 @@ func (n *Node) becomeFollower(term, leader uint64) Update {
 func (n *Node) handlePreVote(message Message) Message {
 	leaderIsRecent := n.leaderID != 0 && n.electionElapsed < n.electionTimeout
 	grant := n.isVoter(n.cfg.ID) && message.Term >= n.term+1 && !leaderIsRecent && n.isUpToDate(message.LogIndex, message.LogTerm)
+	// A grant echoes the proposed term; a rejection reports this node's own term so a
+	// pre-candidate behind it can catch up. The receiver's term never changes here.
+	term := message.Term
+	if !grant {
+		term = n.term
+	}
 	return Message{
-		Type: MsgPreVoteResponse, From: n.cfg.ID, To: message.From, Term: message.Term,
+		Type: MsgPreVoteResponse, From: n.cfg.ID, To: message.From, Term: term,
 		Reject: !grant,
 	}
 }
 
 func (n *Node) handlePreVoteResponse(message Message) Update {
-	if n.role != PreCandidate || message.Term != n.term+1 {
+	// A live voter is at a newer term; adopt it so later pre-votes can succeed.
+	if message.Reject && message.Term > n.term {
+		return n.becomeFollower(message.Term, 0)
+	}
+	granted := !message.Reject && message.Term == n.term+1
+	rejected := message.Reject && message.Term <= n.term
+	if n.role != PreCandidate || (!granted && !rejected) {
 		return Update{}
 	}
-	n.votes[message.From] = !message.Reject
+	n.votes[message.From] = granted
 	if n.membership.hasQuorum(func(id uint64) bool { return n.votes[id] }) {
 		return n.startElection()
 	}

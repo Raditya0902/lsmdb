@@ -155,6 +155,30 @@ Consequences:
   truncate and an upgrade from that state. Version-2 databases are not affected:
   they skip such records by `last_seq`.
 
+### D017 — Pre-vote rejections carry the responder's current term
+
+Context: pre-vote requests carry a proposed term (`term + 1`), and responses echoed
+it whether granted or rejected. A node at term T+1 with a stale log and a node at
+term T with a newer log therefore rejected each other indefinitely while the third
+voter was down. The lower-term node never learned the higher term, because pre-vote
+traffic never propagates terms. This is a reproduced liveness failure (phase 11,
+finding A2).
+
+Decision: adopt the etcd rule.
+
+- A granted pre-vote response still echoes the proposed term.
+- A rejection carries the responder's current term.
+- A node receiving a rejected pre-vote response with a term above its own becomes a
+  follower at that term. This persists `HardState` before any further message is
+  sent, through the existing persist-before-send runtime path.
+- A rejection at the receiver's own term counts as a no-vote, as before.
+- Pre-vote requests still never change the receiver's term, so the D006 guarantee that
+  an isolated node cannot disrupt a healthy term is unchanged.
+
+Consequences: a node can now adopt a higher term from a pre-vote rejection without
+an election. That term already belongs to a live voter, and ordinary messages from
+that voter would cause the same adoption.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

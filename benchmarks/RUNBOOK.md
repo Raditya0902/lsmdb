@@ -244,6 +244,10 @@ Two columns are the evidence for the storm. Read them against the duration:
 - **`ack_resend share`:** the fraction of those messages that were duplicate-ack
   resends.
 
+For a sweep of an arm that includes the phase-12a fix (D018), only
+`appends/entry` is evidence. On those arms `ack_resend` no longer counts
+duplicate-ack resends (section 5).
+
 On Linux, a ratio that keeps growing with duration confirms the duplicate-ack
 storm. A flat ratio would mean the macOS behavior was platform-specific. Count it
 as growth only if the median rises at every step and the 10 s and 60 s min–max
@@ -303,6 +307,28 @@ The 3 s and 20 s rows are single runs, so the throughput decay between them is a
 indication, not a measured effect. If the growth is real, duplicate-ack chains do
 not die out between writes at 1 client, as was previously assumed. The duration
 sweep (3d) tests this on Linux.
+
+**Headline replication metric.** The headline metric is total AppendEntries per
+committed entry (`appends/entry`). The `bench_compare` summary prints it as the
+first metric column, with its min–max range, and gives it the first verdict in each
+comparison line.
+
+The `ack_resend` origin changes meaning at the phase-12a fix (D018):
+- Before the fix it counts rejection probes, follow-ups after advancing acks, and
+  resends after duplicate or stale acks.
+- From the fix onward it counts only rejection probes and follow-ups after
+  advancing acks.
+
+Never compare `ack_resend` per entry, or its share of appends, between arms on
+opposite sides of the fix.
+
+**Send failures.** Reports built from phase-12a commit (a) onward record
+`send_failures_deadline` and `send_failures_other`:
+- **Deadline:** the 500 ms per-message send deadline expired.
+- **Other:** any other failed Raft send.
+
+Both are counted over the measurement window and summed over the three nodes. The
+summary prints their medians per run, or `-` for reports that predate them.
 
 **Checking a result file.** Before quoting any number, run the checker on the
 compare file (or on a single clusterbench report, with at most one `-expect`):

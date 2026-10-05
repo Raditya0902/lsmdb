@@ -69,7 +69,8 @@ and awaiting review. Phase 10 (benchmark harness v2) is next. Phase details:
 
 ## In Progress
 
-None.
+- Phase 12a: duplicate-ack resend fix (D018), branch `phase-12a-dup-ack-fix` from
+  the phase-10 tip `8f07b48`.
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -133,6 +134,18 @@ None.
 - [x] A5: `ChangeMembership` completes when its configuration commits (`4d51087`).
 - [x] Reopen property test at 500 operations per seed by default; long mode via
   `LSMDB_LONG_TESTS=1`; skipped under `-short` (`e656571`).
+
+## Phase 12a — Duplicate-Ack Resend Fix
+
+- [x] Send failures per measurement window, classed as deadline or other, recorded
+  by clusterbench through the `cluster` transport wrapper. The bench_compare
+  summary leads with total AppendEntries per committed entry (`ed9359d`).
+- [x] D018 written; RUNBOOK notes that `ack_resend` changes meaning at the fix.
+- [ ] Leader sends a follow-up append only after an ack that advances `matchIndex`;
+  tests for duplicate acks, rejection probes, heartbeat catch-up, ReadIndex,
+  check-quorum, and a bound on AppendEntries per committed entry.
+- [ ] Official Linux comparison and fix-arm duration sweep, judged against the
+  thresholds pre-registered in `dev/active/phase-12a-dup-ack-fix/plan.md`.
 
 ## Verification Log
 
@@ -225,5 +238,7 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Phase 10: benchmark harness v2 and baseline (`dev/active/phase-10-benchmark-harness-v2/`).
+Phase 12a: the duplicate-ack resend fix (`dev/active/phase-12a-dup-ack-fix/`), then
+its official VM comparison. The phase-10 harness and baseline are done on branch
+`phase-10-benchmark-harness-v2`, which is not yet merged.
 Optional stale follower reads remain deferred.

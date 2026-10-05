@@ -179,6 +179,51 @@ Consequences: a node can now adopt a higher term from a pre-vote rejection witho
 an election. That term already belongs to a live voter, and ordinary messages from
 that voter would cause the same adoption.
 
+### D018 — A success ack triggers a follow-up append only when it advances matchIndex
+
+Context:
+
+- `handleAppendResponse` sent the responder another append after *every* success
+  ack, whenever `nextIndex <= lastIndex` (`internal/raft/node.go:632-635` at
+  `8f07b48`). That included duplicate and stale acks.
+- Each resend produced another ack, so append/ack chains sustained themselves for
+  as long as any entry was unacked.
+- Proposals, commit advances and heartbeats each started new chains.
+- The official Linux baseline (2026-10-05, e2-standard-4, pd-ssd, 30 s window)
+  measured 57–242 AppendEntries per committed entry. Throughput fell from 37 ops/s at
+  1 client to 18–28 ops/s at 2–16 clients, with p99 near 700 ms.
+- This is analysis-report rank 1 (phase 12a).
+
+Decision:
+
+- **Success acks:** a success ack causes a follow-up append to its sender only if it
+  strictly advanced that follower's `matchIndex`, and only while
+  `nextIndex <= lastIndex`.
+- **Rejections:** they still lower `nextIndex` and probe immediately.
+- **Heartbeats:** unchanged. They fire every `HeartbeatTicks` and ship the full
+  suffix from `nextIndex`.
+- **Unchanged:** proposal and commit-advance broadcasts, message sizing, `nextIndex`
+  movement, ReadIndex probes, and the follower's echo of `Context`.
+
+Consequences:
+
+- **Termination:** each follow-up needs a strict increase in `matchIndex`, which is
+  bounded by `lastIndex`. So no ack can start an unbounded chain. Follow-ups to a
+  peer during a term number at most the entries appended in that term.
+- **Catch-up after a lost append or ack:** `nextIndex` never advances
+  optimistically, so the next heartbeat re-ships every unacked entry.
+  - One lost append is recovered within `HeartbeatTicks` ticks, plus one delivery
+    and one persist.
+  - If the next k heartbeats to that follower are lost as well, recovery takes at
+    most `(k + 1) × HeartbeatTicks` ticks.
+  - Proposals and commit advances to that peer can recover it sooner.
+- **Recovery now relies on heartbeats.** It relies on heartbeats carrying entries
+  and on `nextIndex` moving only on responses. A later change to either, such as
+  phase 12c's entry-free heartbeats, optimistic `nextIndex` or inflight window, must
+  first provide another catch-up path. That path is a probe or a resend on timeout.
+- **The `ack_resend` counter changes meaning.** It no longer counts duplicate-ack
+  resends; it counts rejection probes and follow-ups after advancing acks.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

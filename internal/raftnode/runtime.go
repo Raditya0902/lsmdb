@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -75,6 +76,14 @@ type readResult struct {
 }
 
 type pendingProposal struct{ result chan proposalResult }
+
+// pendingMembership waits for a voter set to become the committed configuration.
+// Its final entry's index cannot be predicted: client proposals accepted while the
+// joint configuration is uncommitted are appended before it.
+type pendingMembership struct {
+	voters []uint64
+	result chan proposalResult
+}
 type pendingRead struct {
 	result chan readResult
 	acks   map[uint64]struct{}
@@ -91,6 +100,8 @@ type Runtime struct {
 	done              chan struct{}
 	snapshotThreshold uint64
 	once              sync.Once
+	// membership is owned by the event loop; at most one change runs at a time.
+	membership *pendingMembership
 }
 
 // Start begins a runtime. The supplied node must have been restored using the
@@ -298,7 +309,7 @@ func (r *Runtime) run(tickInterval time.Duration) {
 					event.result <- proposalResult{index: index}
 					continue
 				}
-				pending[index] = pendingProposal{result: event.result}
+				r.membership = &pendingMembership{voters: event.voters, result: event.result}
 				if err := r.processUpdate(update, pending, pendingReads); err != nil {
 					r.fail(err, pending, pendingReads)
 					return
@@ -432,7 +443,12 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 			}
 		}
 	}
+	r.resolveMembership()
 	if update.RoleChanged && r.node.Status().Role != raft.Leader {
+		if r.membership != nil {
+			r.membership.result <- proposalResult{err: raft.ErrNotLeader}
+			r.membership = nil
+		}
 		for index, waiter := range pending {
 			waiter.result <- proposalResult{index: index, err: raft.ErrNotLeader}
 			delete(pending, index)
@@ -443,6 +459,36 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 		}
 	}
 	return nil
+}
+
+// resolveMembership completes a pending ChangeMembership once its voter set is the
+// applied, non-joint configuration, returning that configuration's log index.
+func (r *Runtime) resolveMembership() {
+	if r.membership == nil {
+		return
+	}
+	current := r.node.Status().Membership
+	if len(current.JointVoters) != 0 || current.Index > r.machine.AppliedIndex() || !sameVoters(current.Voters, r.membership.voters) {
+		return
+	}
+	r.membership.result <- proposalResult{index: current.Index}
+	r.membership = nil
+}
+
+func sameVoters(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sortedA := append([]uint64(nil), a...)
+	sortedB := append([]uint64(nil), b...)
+	sort.Slice(sortedA, func(i, j int) bool { return sortedA[i] < sortedA[j] })
+	sort.Slice(sortedB, func(i, j int) bool { return sortedB[i] < sortedB[j] })
+	for i := range sortedA {
+		if sortedA[i] != sortedB[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runtime) acknowledgeRead(message raft.Message, pendingReads map[uint64]pendingRead) {
@@ -495,6 +541,10 @@ func (r *Runtime) sendLoop() {
 }
 
 func (r *Runtime) fail(cause error, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) {
+	if r.membership != nil {
+		r.membership.result <- proposalResult{err: cause}
+		r.membership = nil
+	}
 	for index, waiter := range pending {
 		waiter.result <- proposalResult{index: index, err: cause}
 	}

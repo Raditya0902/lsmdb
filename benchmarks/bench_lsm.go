@@ -372,7 +372,7 @@ func workloadHLSM(d *lsmDB) ([]time.Duration, error) {
 // concurrent random Gets. Returns per-op latencies and total wall time.
 func workloadGLSM(d *lsmDB, goroutines int) ([]time.Duration, time.Duration, error) {
 	const (
-		numKeys = 10_000
+		numKeys  = 10_000
 		getsPerG = 1_000
 	)
 

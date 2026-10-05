@@ -92,7 +92,7 @@ func (s *sqliteDB) batchSet(keys, values [][]byte) error {
 		}
 		for j := i; j < end; j++ {
 			if _, err := stmt.Exec(keys[j], values[j]); err != nil {
-				stmt.Close() //nolint:errcheck
+				stmt.Close()  //nolint:errcheck
 				tx.Rollback() //nolint:errcheck
 				return err
 			}

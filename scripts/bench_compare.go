@@ -153,6 +153,7 @@ func runCommand(ctx context.Context, args []string) error {
 		NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
 	}
 	binaries := map[string]string{}
+	forward := map[string]bool{}
 	worktrees := map[string]string{}
 	defer func() {
 		for name, dir := range worktrees {
@@ -172,8 +173,11 @@ func runCommand(ctx context.Context, args []string) error {
 			return fmt.Errorf("arm %s: build clusterbench: %w", arm.Name, err)
 		}
 		binaries[arm.Name] = bin
+		build.LabelsForwarded = acceptsLabels(ctx, dir, bin)
+		forward[arm.Name] = build.LabelsForwarded
 		combined.Arms = append(combined.Arms, build)
-		fmt.Fprintf(os.Stderr, "arm %s: %s (base %s, picked %v)\n", arm.Name, short(build.HeadSHA), short(build.BaseSHA), build.PickedSHAs)
+		fmt.Fprintf(os.Stderr, "arm %s: %s (base %s, picked %v, labels forwarded: %v)\n",
+			arm.Name, short(build.HeadSHA), short(build.BaseSHA), build.PickedSHAs, build.LabelsForwarded)
 	}
 
 	// Created only once every arm has built, so a failed setup leaves no empty file.
@@ -191,7 +195,7 @@ func runCommand(ctx context.Context, args []string) error {
 	slots := benchcompare.Schedule(names, opts.clients, opts.repetitions)
 	for _, slot := range slots {
 		fmt.Fprintf(os.Stderr, "[%d/%d] arm %s, %d clients, repetition %d\n", slot.Sequence, len(slots), slot.Arm, slot.Clients, slot.Repetition)
-		report, err := runSlot(ctx, opts, slot, binaries[slot.Arm], worktrees[slot.Arm])
+		report, err := runSlot(ctx, opts, slot, binaries[slot.Arm], worktrees[slot.Arm], forward[slot.Arm])
 		if err != nil {
 			return err
 		}
@@ -253,12 +257,12 @@ func prepareArm(ctx context.Context, root, dir string, arm benchcompare.Arm, wor
 
 // runSlot runs one clusterbench invocation from the arm's worktree, so the
 // git revision it records is the arm's own.
-func runSlot(ctx context.Context, opts runOptions, slot benchcompare.Slot, bin, dir string) (json.RawMessage, error) {
+func runSlot(ctx context.Context, opts runOptions, slot benchcompare.Slot, bin, dir string, forwardLabels bool) (json.RawMessage, error) {
 	path := filepath.Join(opts.work, "runs", fmt.Sprintf("%03d-%s-c%d-r%d.json", slot.Sequence, slot.Arm, slot.Clients, slot.Repetition))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	args := append([]string{"-clients=" + strconv.Itoa(slot.Clients), "-repetitions=1", "-out=" + path}, opts.extra...)
+	args := benchcompare.SlotArgs(slot.Clients, path, opts.extra, opts.machineType, opts.diskType, forwardLabels)
 	if err := command(ctx, dir, bin, args...).Run(); err != nil {
 		return nil, fmt.Errorf("slot %d (arm %s, %d clients): %w", slot.Sequence, slot.Arm, slot.Clients, err)
 	}
@@ -313,6 +317,15 @@ func rewrite(out *os.File, combined benchcompare.Combined) error {
 		return err
 	}
 	return out.Sync()
+}
+
+// acceptsLabels asks an arm's clusterbench for its usage text. -h exits
+// non-zero after printing it, so only the text is inspected.
+func acceptsLabels(ctx context.Context, dir, bin string) bool {
+	cmd := exec.CommandContext(ctx, bin, "-h")
+	cmd.Dir = dir
+	usage, _ := cmd.CombinedOutput()
+	return benchcompare.AcceptsLabels(string(usage))
 }
 
 func command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {

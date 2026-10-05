@@ -465,3 +465,63 @@ func TestSummaryShowsSendFailuresOnlyWhereRecorded(t *testing.T) {
 		t.Errorf("fix row send failures = %v, want 3 1: %q", got, lines[3])
 	}
 }
+
+const usageWithLabels = `Usage of clusterbench:
+  -clients string
+    	comma-separated client counts; each runs on a fresh cluster (default "1,2,4,8,16")
+  -disk-type string
+    	disk under -data-dir, e.g. local NVMe or pd-ssd; required with -official
+  -machine-type string
+    	machine or instance type, e.g. n2-standard-8; required with -official
+  -official
+    	label the run official
+`
+
+const usageBeforeLabels = `Usage of clusterbench:
+  -clients string
+    	comma-separated client counts (default "1,2,4,8,16")
+  -official
+    	label the run official; record -machine-type and -disk-type elsewhere
+`
+
+func TestAcceptsLabelsReadsDeclaredFlagsOnly(t *testing.T) {
+	cases := []struct {
+		name  string
+		usage string
+		want  bool
+	}{
+		{"both flags declared", usageWithLabels, true},
+		{"arm built before the flags existed", usageBeforeLabels, false},
+		{"only machine-type declared", "  -machine-type string\n    \tmachine\n", false},
+		{"empty usage", "", false},
+	}
+	for _, tc := range cases {
+		if got := AcceptsLabels(tc.usage); got != tc.want {
+			t.Errorf("%s: AcceptsLabels = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestSlotArgsForwardLabelsOnlyToArmsThatAcceptThem(t *testing.T) {
+	extra := []string{"-official", "-warmup", "5s", "-duration", "30s"}
+	const machine, disk = "e2-standard-4", "pd-ssd 100GB boot disk (network)"
+	base := []string{"-clients=4", "-repetitions=1", "-out=/w/runs/001.json"}
+
+	got := SlotArgs(4, "/w/runs/001.json", extra, machine, disk, true)
+	want := append(append(append([]string{}, base...), "-machine-type="+machine, "-disk-type="+disk), extra...)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("forwarding arm args =\n  %q\nwant\n  %q", got, want)
+	}
+	got = SlotArgs(4, "/w/runs/001.json", extra, machine, disk, false)
+	want = append(append([]string{}, base...), extra...)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("older arm args = %q, want %q (labels stay in the combined file only)", got, want)
+	}
+	got = SlotArgs(4, "/w/runs/001.json", nil, "", "", true)
+	if strings.Join(got, "|") != strings.Join(base, "|") {
+		t.Errorf("unlabelled run args = %q, want %q", got, base)
+	}
+	if err := ValidateExtraArgs([]string{"-machine-type=x"}); err == nil {
+		t.Error("labels passed after -- must still be rejected; the driver owns them")
+	}
+}

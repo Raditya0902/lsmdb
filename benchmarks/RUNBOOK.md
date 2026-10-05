@@ -81,9 +81,15 @@ arguments, including the `-data-dir` path, in `clusterbench_args`, and the check
 fails any file that contains a home path.
 
 Official cluster runs refuse to start without `-machine-type` and `-disk-type`.
-`bench_compare` takes these two flags itself, before `--`. It records them in the
-combined file instead of passing them to the arms, because older arms'
-`clusterbench` binaries do not accept them.
+`bench_compare` takes these two flags itself, before `--`, and always records them
+in the combined file.
+- **Arms built from `ce1a858` or later:** these `clusterbench` binaries require the
+  labels with `-official`, so `bench_compare` passes them on. It checks for them in
+  each arm binary's `-h` output.
+- **Older arms:** their binaries reject the flags, so `bench_compare` does not pass
+  them on.
+
+Each arm's `labels_forwarded` field in the combined file records which case applied.
 
 ## 2. Pre-run checklist
 

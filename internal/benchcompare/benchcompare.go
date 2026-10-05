@@ -31,12 +31,14 @@ type Arm struct {
 	Picks []string `json:"picks,omitempty"`
 }
 
-// ArmBuild records the exact commits an arm's binary was built from.
+// ArmBuild records the exact commits an arm's binary was built from, and
+// whether the driver's machine labels were passed to that binary.
 type ArmBuild struct {
 	Arm
-	BaseSHA    string   `json:"base_sha"`
-	HeadSHA    string   `json:"head_sha"`
-	PickedSHAs []string `json:"picked_shas,omitempty"`
+	BaseSHA         string   `json:"base_sha"`
+	HeadSHA         string   `json:"head_sha"`
+	PickedSHAs      []string `json:"picked_shas,omitempty"`
+	LabelsForwarded bool     `json:"labels_forwarded"`
 }
 
 // Slot is one clusterbench invocation in the interleaved schedule.
@@ -108,6 +110,36 @@ func checkRev(rev string) error {
 		return fmt.Errorf("revision %q contains whitespace", rev)
 	}
 	return nil
+}
+
+// labelFlags are the clusterbench flags that carry the driver's machine labels.
+var labelFlags = []*regexp.Regexp{
+	regexp.MustCompile(`(?m)^\s*-machine-type\s`),
+	regexp.MustCompile(`(?m)^\s*-disk-type\s`),
+}
+
+// AcceptsLabels reports whether clusterbench usage text (its -h output)
+// declares both -machine-type and -disk-type. Binaries built before those
+// flags existed do not, and reject them; binaries that have them require them
+// with -official.
+func AcceptsLabels(usage string) bool {
+	for _, flag := range labelFlags {
+		if !flag.MatchString(usage) {
+			return false
+		}
+	}
+	return true
+}
+
+// SlotArgs builds one slot's clusterbench arguments. The driver's machine and
+// disk labels are passed only to arms whose clusterbench accepts them and only
+// when set; they are always recorded in the combined file.
+func SlotArgs(clients int, out string, extra []string, machineType, diskType string, forwardLabels bool) []string {
+	args := []string{"-clients=" + strconv.Itoa(clients), "-repetitions=1", "-out=" + out}
+	if forwardLabels && machineType != "" && diskType != "" {
+		args = append(args, "-machine-type="+machineType, "-disk-type="+diskType)
+	}
+	return append(args, extra...)
 }
 
 // Schedule interleaves arms: each repetition runs every client count on every

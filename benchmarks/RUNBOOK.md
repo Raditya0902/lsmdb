@@ -196,7 +196,7 @@ happens on Linux. It is not official: windows other than 30 s break the protocol
 so it never passes `-official` and its files are labeled `secondary`.
 
 It measures only the tip arm, at 1 client, with durations of 10, 20, 30 and 60 s
-and 3 repetitions each. `bench_compare` needs at least two arms, so the sweep runs
+and 5 repetitions each. `bench_compare` needs at least two arms, so the sweep runs
 `clusterbench` directly from this checkout. That binary runs the tip arm's engine:
 no engine file changed between `8eae967` and the branch head, which the first
 command confirms. `clusterbench` takes `-machine-type` and `-disk-type` itself, with
@@ -207,7 +207,7 @@ git diff --quiet 8eae967 HEAD -- . ':!cmd' ':!scripts' ':!benchmarks' ':!interna
   && echo "engine matches the tip arm"
 mkdir -p "$BENCH/sweep"
 for d in 10 20 30 60; do
-  go run ./cmd/clusterbench -clients 1 -repetitions 3 -warmup 5s -duration "${d}s" \
+  go run ./cmd/clusterbench -clients 1 -repetitions 5 -warmup 5s -duration "${d}s" \
     -data-dir "$BENCH" -machine-type "$MACHINE" -disk-type "$DISK" \
     -out "$BENCH/sweep/tip-${d}s.json" || break
 done
@@ -217,20 +217,26 @@ done
 go run scripts/sweep_table.go "$BENCH"/sweep/tip-*s.json
 ```
 
-The sweep takes about 8 minutes. Each file's check should pass everything except
+The sweep takes about 13 minutes. Each file's check should pass everything except
 `protocol`, which warns. `sweep_table` prints one row per run, ordered by duration.
-Read three columns against the duration:
+
+Two columns are the evidence for the storm. Read them against the duration:
 - **`appends/entry`:** AppendEntries messages per committed entry;
 - **`ack_resend share`:** the fraction of those messages that were duplicate-ack
-  resends;
-- **`ops/s`:** throughput.
+  resends.
 
 On Linux, a ratio that keeps growing with duration confirms the duplicate-ack
 storm. A flat ratio would mean the macOS behavior was platform-specific. Count it
 as growth only if the median rises at every step and the 10 s and 60 s min–max
-ranges are disjoint. With 3 runs each, disjoint ranges happen by chance 10% of the
-time, so the sweep is a diagnosis, not a result. Ignore rows whose `valid` column
-is not `yes`.
+ranges are disjoint. With 5 runs each, disjoint ranges happen by chance about 0.8%
+of the time. The sweep is still a diagnosis, not a result. Ignore rows whose
+`valid` column is not `yes`.
+
+Do not cite throughput (`ops/s`) against duration as a storm effect. The retained
+Raft log grows for the whole run, because the snapshot threshold of 1,000,000
+entries is never reached. On every accepted append, `handleAppend` copies the
+whole retained log and `rebuildMembership` decodes all of it. So throughput can fall
+with duration whether or not the storm exists.
 
 ## 4. Official embedded run
 

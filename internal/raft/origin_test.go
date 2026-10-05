@@ -37,9 +37,10 @@ func TestAppendOriginTags(t *testing.T) {
 		{"ack that advances commit", func() Update {
 			return node.Step(Message{Type: MsgAppendResponse, From: 2, To: 1, Term: 1, LogIndex: 2})
 		}, map[MessageOrigin]int{OriginCommitAdvance: 2, OriginAckResend: 1}},
+		// D018: an ack that does not advance matchIndex sends nothing.
 		{"duplicate ack", func() Update {
 			return node.Step(Message{Type: MsgAppendResponse, From: 2, To: 1, Term: 1, LogIndex: 2})
-		}, map[MessageOrigin]int{OriginAckResend: 1}},
+		}, map[MessageOrigin]int{}},
 		{"rejection retry", func() Update {
 			return node.Step(Message{Type: MsgAppendResponse, From: 3, To: 1, Term: 1, Reject: true, RejectHint: 1})
 		}, map[MessageOrigin]int{OriginAckResend: 1}},

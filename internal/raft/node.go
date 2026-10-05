@@ -624,13 +624,18 @@ func (n *Node) handleAppendResponse(message Message) Update {
 		n.nextIndex[message.From] = max(1, next)
 		return Update{Messages: []Message{n.appendMessage(message.From, message.Context, OriginAckResend)}}
 	}
+	advanced := false
 	if message.LogIndex > n.matchIndex[message.From] {
 		matched := min(message.LogIndex, n.lastIndex())
+		advanced = matched > n.matchIndex[message.From]
 		n.matchIndex[message.From] = matched
 		n.nextIndex[message.From] = matched + 1
 	}
 	update := n.maybeCommit()
-	if n.nextIndex[message.From] <= n.lastIndex() {
+	// A duplicate or stale ack proves nothing new, and answering it sustained
+	// endless append/ack chains (D018). Heartbeats re-ship whatever a lost
+	// message left behind, because nextIndex only moves on responses.
+	if advanced && n.nextIndex[message.From] <= n.lastIndex() {
 		update.Messages = append(update.Messages, n.appendMessage(message.From, message.Context, OriginAckResend))
 	}
 	return update

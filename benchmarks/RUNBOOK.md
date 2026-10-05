@@ -57,6 +57,10 @@ export MACHINE="n2-standard-8"   # the provider's machine type, or the host's mo
 export DISK="local NVMe SSD"     # the disk under $BENCH, e.g. local NVMe or pd-ssd
 ```
 
+`$BENCH` must be outside `/home`. `bench_compare` records its pass-through
+arguments, including the `-data-dir` path, in `clusterbench_args`, and the checker
+fails any file that contains a home path.
+
 Official cluster runs refuse to start without `-machine-type` and `-disk-type`.
 `bench_compare` takes these two flags itself, before `--`. It records them in the
 combined file instead of passing them to the arms, because older arms'
@@ -185,6 +189,49 @@ The output has three timing fields:
 The probe client retries every 25 ms for at most 60 attempts, so failover is
 resolved to about 25 ms.
 
+### 3d. Duration sweep
+
+This sweep checks whether the duplicate-ack growth seen on macOS (section 5) also
+happens on Linux. It is not official: windows other than 30 s break the protocol,
+so it never passes `-official` and its files are labeled `secondary`.
+
+It measures only the tip arm, at 1 client, with durations of 10, 20, 30 and 60 s
+and 3 repetitions each. `bench_compare` needs at least two arms, so the sweep runs
+`clusterbench` directly from this checkout. That binary runs the tip arm's engine:
+no engine file changed between `8eae967` and the branch head, which the first
+command confirms. `clusterbench` takes `-machine-type` and `-disk-type` itself, with
+the same `$MACHINE` and `$DISK` as the baseline.
+
+```bash
+git diff --quiet 8eae967 HEAD -- . ':!cmd' ':!scripts' ':!benchmarks' ':!internal/bench*' \
+  && echo "engine matches the tip arm"
+mkdir -p "$BENCH/sweep"
+for d in 10 20 30 60; do
+  go run ./cmd/clusterbench -clients 1 -repetitions 3 -warmup 5s -duration "${d}s" \
+    -data-dir "$BENCH" -machine-type "$MACHINE" -disk-type "$DISK" \
+    -out "$BENCH/sweep/tip-${d}s.json" || break
+done
+for f in "$BENCH"/sweep/tip-*s.json; do
+  go run scripts/vm_smoke_check.go -expect head="$(git rev-parse HEAD)" "$f"
+done
+go run scripts/sweep_table.go "$BENCH"/sweep/tip-*s.json
+```
+
+The sweep takes about 8 minutes. Each file's check should pass everything except
+`protocol`, which warns. `sweep_table` prints one row per run, ordered by duration.
+Read three columns against the duration:
+- **`appends/entry`:** AppendEntries messages per committed entry;
+- **`ack_resend share`:** the fraction of those messages that were duplicate-ack
+  resends;
+- **`ops/s`:** throughput.
+
+On Linux, a ratio that keeps growing with duration confirms the duplicate-ack
+storm. A flat ratio would mean the macOS behavior was platform-specific. Count it
+as growth only if the median rises at every step and the 10 s and 60 s min–max
+ranges are disjoint. With 3 runs each, disjoint ranges happen by chance 10% of the
+time, so the sweep is a diagnosis, not a result. Ignore rows whose `valid` column
+is not `yes`.
+
 ## 4. Official embedded run
 
 ```bash
@@ -193,6 +240,9 @@ go run ./cmd/bench -official -repetitions 5 -data-dir "$BENCH"
 
 The embedded workloads are small: each timed section lasts milliseconds. Compare
 min–max ranges, not single medians.
+
+`cmd/bench` records no machine or disk type, even with `-official`. Its result
+files must not be committed until phase 14.
 
 ## 5. Reading and archiving results
 
@@ -213,7 +263,10 @@ At 5 runs per arm, two identical distributions produce disjoint ranges by chance
 **Counter ratios and throughput depend on window length.** Both are comparable only
 between runs with the same `-duration`, and every report must state its window
 length. Duplicate-ack AppendEntries traffic keeps growing while the cluster runs,
-even at 1 client. Secondary smoke runs on an Apple M4 (macOS) at 1 client measured:
+even at 1 client. The table below is an observation from secondary smoke runs on
+an Apple M4 (macOS) at 1 client. Their raw result files were not retained, so it
+cannot be re-verified. It is why the protocol fixes the window length; it is not a
+result.
 
 | Window | AppendEntries per committed entry | Throughput |
 |---|---:|---:|
@@ -222,8 +275,9 @@ even at 1 client. Secondary smoke runs on an Apple M4 (macOS) at 1 client measur
 | 20 s (1 run) | 112 | 78.9 ops/s |
 
 The 3 s and 20 s rows are single runs, so the throughput decay between them is an
-indication, not a measured effect. This growth means duplicate-ack chains do not die
-out between writes at 1 client, as was previously assumed.
+indication, not a measured effect. If the growth is real, duplicate-ack chains do
+not die out between writes at 1 client, as was previously assumed. The duration
+sweep (3d) tests this on Linux.
 
 **Checking a result file.** Before quoting any number, run the checker on the
 compare file (or on a single clusterbench report, with at most one `-expect`):
@@ -246,15 +300,39 @@ It then prints a table of every run, and exits 1 if any check failed. It searche
 for the hostname and username of the machine it runs on. To check a VM's file
 elsewhere, add `-forbid <vm-hostname> -forbid <vm-user>`.
 
+The IP check matches any four dot-separated numbers, so a version string such as
+the kernel release `5.15.153.1` can trip it. If it flags one:
+1. Inspect the file by hand to confirm the match is not an address.
+2. Fix the pattern in `internal/benchcheck/privacy.go`, with a test case for that
+   string.
+
+Never loosen the pattern without a test.
+
+**CPU count.** The environment block records `gomaxprocs`, not the machine's CPU
+count. Since Go 1.25, `gomaxprocs` follows container CPU limits, so it can be lower.
+Until the block records the CPU count itself, keep a notes file next to each
+official result:
+
+```bash
+{ echo "nproc: $(nproc)"; lscpu; } > "benchmarks/results/$(date -u +%F)-notes.txt"
+grep -m1 '"gomaxprocs"' benchmarks/results/<file>-compare.json \
+  >> "benchmarks/results/$(date -u +%F)-notes.txt"
+```
+
+`gomaxprocs` must equal `nproc`. A `num_cpu` field in the environment block is
+planned as a separate small commit. That commit must land before any official
+result file is committed.
+
 **Archiving.** Keep together:
 - the compare JSON files;
 - the embedded JSON;
-- the checklist text;
+- the checklist text and the notes file;
 - the per-run reports, in the `runs/` directory under each `-work` directory.
 
 ```bash
 tar czf "benchmarks/results/$(date -u +%F)-$(git rev-parse --short=12 HEAD)-archive.tgz" \
-  benchmarks/results/*.json benchmarks/results/*-checklist.txt "$BENCH"/*/runs
+  benchmarks/results/*.json benchmarks/results/*-checklist.txt \
+  benchmarks/results/*-notes.txt "$BENCH"/*/runs
 ```
 
 `benchmarks/results/` is not ignored by git. Files there show as untracked until a

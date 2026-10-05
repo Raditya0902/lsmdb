@@ -177,14 +177,15 @@ func TestSummaryExcludesInvalidRuns(t *testing.T) {
 		t.Fatalf("comparisons = %+v, want tip against base", summary.Comparisons)
 	}
 	cmp := summary.Comparisons[0]
-	if cmp.Base != "base" || cmp.Other != "tip" || !cmp.ThroughputMeaningful || !cmp.P99Meaningful {
-		t.Fatalf("comparison = %+v, want disjoint throughput and p99", cmp)
+	// Two valid runs per arm are below MinValidRuns, so disjoint ranges are not enough.
+	if cmp.Base != "base" || cmp.Other != "tip" || !cmp.InsufficientRuns || cmp.ThroughputMeaningful || cmp.P99Meaningful {
+		t.Fatalf("comparison = %+v, want insufficient runs and nothing marked meaningful", cmp)
 	}
 	var text bytes.Buffer
 	if err := WriteSummary(&text, summary); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"secondary", "base", "tip", "meaningful"} {
+	for _, want := range []string{"secondary", "base", "tip", "insufficient runs"} {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("summary text lacks %q:\n%s", want, text.String())
 		}
@@ -261,5 +262,59 @@ func TestIncompleteComparisonIsFlagged(t *testing.T) {
 	}
 	if !strings.Contains(text.String(), "INCOMPLETE") {
 		t.Fatalf("summary of an unfinished comparison is not flagged:\n%s", text.String())
+	}
+}
+
+// armRuns builds a two-arm comparison at one client count with the given
+// number of valid runs per arm. Tip throughput is always above base, so the
+// ranges are disjoint whenever both arms have runs.
+func armRuns(t *testing.T, baseValid, tipValid int) Combined {
+	t.Helper()
+	combined := Combined{Arms: []ArmBuild{{Arm: Arm{Name: "base"}}, {Arm: Arm{Name: "tip"}}}}
+	add := func(arm string, valid int, throughput, p99 float64) {
+		for i := 0; i < valid; i++ {
+			slot := Slot{Sequence: len(combined.Runs) + 1, Repetition: i + 1, Clients: 1, Arm: arm}
+			combined.Runs = append(combined.Runs, ArmRun{Slot: slot, Report: report(t, "secondary", 1, true, throughput+float64(i), p99+float64(i), nil)})
+		}
+	}
+	add("base", baseValid, 100, 10)
+	add("tip", tipValid, 200, 50)
+	return combined
+}
+
+func TestComparisonNeedsMinValidRunsPerArm(t *testing.T) {
+	cases := []struct {
+		name                 string
+		baseValid, tipValid  int
+		wantInsufficient     bool
+		wantText, forbidText string
+	}{
+		{"both at threshold", MinValidRuns, MinValidRuns, false, "meaningful (ranges disjoint)", "insufficient runs"},
+		{"base one below", MinValidRuns - 1, MinValidRuns, true, "insufficient runs", "meaningful"},
+		{"tip one below", MinValidRuns, MinValidRuns - 1, true, "insufficient runs", "meaningful"},
+		{"above threshold", MinValidRuns + 2, MinValidRuns + 1, false, "meaningful (ranges disjoint)", "insufficient runs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			summary, err := Summarize(armRuns(t, tc.baseValid, tc.tipValid))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmp := summary.Comparisons[0]
+			if cmp.InsufficientRuns != tc.wantInsufficient {
+				t.Fatalf("insufficient = %v, want %v: %+v", cmp.InsufficientRuns, tc.wantInsufficient, cmp)
+			}
+			if wantMeaningful := !tc.wantInsufficient; cmp.ThroughputMeaningful != wantMeaningful || cmp.P99Meaningful != wantMeaningful {
+				t.Fatalf("meaningful flags = %v/%v, want %v: %+v", cmp.ThroughputMeaningful, cmp.P99Meaningful, wantMeaningful, cmp)
+			}
+			var text bytes.Buffer
+			if err := WriteSummary(&text, summary); err != nil {
+				t.Fatal(err)
+			}
+			comparisonLine := text.String()[strings.LastIndex(text.String(), "clients 1, tip vs base"):]
+			if !strings.Contains(comparisonLine, tc.wantText) || strings.Contains(comparisonLine, tc.forbidText) {
+				t.Fatalf("comparison line = %q, want %q and not %q", comparisonLine, tc.wantText, tc.forbidText)
+			}
+		})
 	}
 }

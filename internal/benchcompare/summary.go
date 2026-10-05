@@ -51,11 +51,21 @@ type Cell struct {
 	AckResendPerEntry Range  `json:"ack_resend_per_committed_entry"`
 }
 
+// MinValidRuns is the fewest valid runs each arm needs before a comparison
+// can be called meaningful. With five runs per arm, two identical
+// distributions give disjoint ranges by chance 2/C(10,5), about 0.8% of the time.
+const MinValidRuns = 5
+
 // Comparison sets one arm against the first (baseline) arm at one client count.
+// When either arm has fewer than MinValidRuns valid runs, InsufficientRuns is
+// set and neither meaningful flag is.
 type Comparison struct {
 	Clients              int     `json:"clients"`
 	Base                 string  `json:"base"`
 	Other                string  `json:"other"`
+	BaseValidRuns        int     `json:"base_valid_runs"`
+	OtherValidRuns       int     `json:"other_valid_runs"`
+	InsufficientRuns     bool    `json:"insufficient_runs"`
 	ThroughputRatio      float64 `json:"throughput_median_ratio"`
 	ThroughputMeaningful bool    `json:"throughput_meaningful"`
 	P99Meaningful        bool    `json:"p99_meaningful"`
@@ -203,13 +213,16 @@ func compare(cells []Cell, arms []ArmBuild) []Comparison {
 		b := byKey[cellKey{base, count}]
 		for _, arm := range arms[1:] {
 			o := byKey[cellKey{arm.Name, count}]
-			comparable := b.ValidRuns > 0 && o.ValidRuns > 0
-			cmp := Comparison{Clients: count, Base: base, Other: arm.Name}
-			if comparable && b.Throughput.Median != 0 {
+			cmp := Comparison{
+				Clients: count, Base: base, Other: arm.Name,
+				BaseValidRuns: b.ValidRuns, OtherValidRuns: o.ValidRuns,
+				InsufficientRuns: b.ValidRuns < MinValidRuns || o.ValidRuns < MinValidRuns,
+			}
+			if b.ValidRuns > 0 && o.ValidRuns > 0 && b.Throughput.Median != 0 {
 				cmp.ThroughputRatio = o.Throughput.Median / b.Throughput.Median
 			}
-			cmp.ThroughputMeaningful = comparable && Meaningful(b.Throughput, o.Throughput)
-			cmp.P99Meaningful = comparable && Meaningful(b.P99Ms, o.P99Ms)
+			cmp.ThroughputMeaningful = !cmp.InsufficientRuns && Meaningful(b.Throughput, o.Throughput)
+			cmp.P99Meaningful = !cmp.InsufficientRuns && Meaningful(b.P99Ms, o.P99Ms)
 			out = append(out, cmp)
 		}
 	}
@@ -235,6 +248,12 @@ func WriteSummary(w io.Writer, summary Summary) error {
 		return err
 	}
 	for _, cmp := range summary.Comparisons {
+		if cmp.InsufficientRuns {
+			fmt.Fprintf(w, "clients %d, %s vs %s: throughput x%.3f; insufficient runs (%s %d valid, %s %d valid; need %d per arm)\n",
+				cmp.Clients, cmp.Other, cmp.Base, cmp.ThroughputRatio,
+				cmp.Base, cmp.BaseValidRuns, cmp.Other, cmp.OtherValidRuns, MinValidRuns)
+			continue
+		}
 		fmt.Fprintf(w, "clients %d, %s vs %s: throughput x%.3f %s; p99 %s\n", cmp.Clients, cmp.Other, cmp.Base,
 			cmp.ThroughputRatio, verdict(cmp.ThroughputMeaningful), verdict(cmp.P99Meaningful))
 	}
@@ -249,5 +268,5 @@ func verdict(meaningful bool) string {
 	if meaningful {
 		return "meaningful (ranges disjoint)"
 	}
-	return "not meaningful (ranges overlap or a side has no valid runs)"
+	return "not meaningful (ranges overlap)"
 }

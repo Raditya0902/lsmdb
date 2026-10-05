@@ -3,6 +3,7 @@ package tests
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"testing"
 
 	"lsmdb/db"
@@ -139,11 +140,17 @@ func TestPropertyCompactionIsIdempotent(t *testing.T) {
 // TestPropertyRandomOpsWithReopen compares the engine with a reference map while
 // interleaving writes, deletes, flushes, compactions, and reopens. Reopening after
 // a flush is what exposed sequence-number reuse, so every seed exercises it.
+// Every flush syncs files, so the default run is short; LSMDB_LONG_TESTS=1 runs
+// the long version and -short skips the test.
 func TestPropertyRandomOpsWithReopen(t *testing.T) {
-	const (
-		numOps  = 1000
-		numKeys = 16
-	)
+	if testing.Short() {
+		t.Skip("fsync-heavy property test; skipped under -short")
+	}
+	const numKeys = 16
+	numOps := 500
+	if os.Getenv("LSMDB_LONG_TESTS") == "1" {
+		numOps = 5000
+	}
 	opts := &db.Options{FlushThreshold: 32, CompactionThreshold: 3}
 	keys := make([]string, numKeys)
 	for i := range keys {

@@ -428,6 +428,68 @@ Consequences:
   - There is no supported downgrade path: a refused node needs its newer binary
     back.
 
+### D021 — A voter in lease ignores a higher-term vote request
+
+Status: proposed 2026-10-05 (phase 12b vote lease, Step 1), awaiting approval.
+
+Context:
+
+- The A3 diagnostics logged 15 elections after the first leader. In 2 of
+  them, a follower granted a pre-vote while its lease had lapsed. It then
+  heard the leader again, and still voted at the higher term 2.8 ms and 9.6 ms
+  later.
+- `handlePreVote` checks the lease (`internal/raft/node.go:413-414` at
+  `658cfa0`). `handleVote` does not (`:447-462`).
+- `Step` adopts any higher term before either handler runs (`:153-159`).
+- etcd ignores higher-term pre-vote and vote requests in lease under
+  check-quorum.
+
+Decision:
+
+- **In lease**, one predicate for both handlers:
+  `role == Leader || (leaderID != 0 && electionElapsed < electionTimeout)`.
+  - A follower is in lease from processing an append or snapshot from the
+    leader until its randomized election timeout expires.
+  - A pre-candidate, a candidate, and a node that has just adopted a term are
+    never in lease (`leaderID == 0`).
+  - A leader is in lease while it is leader. Its `electionElapsed` still does
+    not advance; the role test replaces the reliance on that frozen counter.
+  - A leader leaves its lease only by leaving the role: through check-quorum
+    (at most `2 × CheckQuorumTicks` ticks after its last quorum contact),
+    through removal from the voter set, or by adopting a higher term from a
+    message it accepts.
+- **Where:** in `Step`, before the higher-term adoption. A `MsgVote` with a
+  term above this node's, received in lease, is ignored. The term, vote,
+  leader, election timer and log stay unchanged, and nothing is persisted or
+  sent. Same-term vote requests are handled as before.
+- **Silent, not rejected:** any reply would carry the voter's lower term. The
+  candidate answers a lower-term message through `rejectStale` at its higher
+  term (`:772-786`), and the voter would adopt that term, leaving its lease
+  within one round trip.
+- **Pre-vote is unchanged:** an in-lease receiver still replies with a
+  rejection that carries its own term (D017). Pre-vote requests never adopt a
+  term.
+- **With D017:** D017 adopts a term only from a rejected pre-vote response,
+  which only a pre-candidate receives, and a pre-candidate is never in lease.
+  An ignored vote sends nothing, so it never feeds that path. The A2 deadlock
+  has no leader and therefore no lease.
+
+Consequences:
+
+- An election like the two observed fails instead of deposing a leader that a
+  majority can still hear.
+- **Failover after a leader stop is unchanged:** a voter can re-enter its
+  lease only by hearing the stopped leader. Tests record per-seed tick counts
+  before and after.
+- **A node that really holds a higher term** still costs one leader change.
+  Its votes are ignored, but its append responses at that term make the
+  leader step down. This is required for it to rejoin, and etcd does the same.
+- **Lease length:** the lease is counted in the node's own ticks. A busy event
+  loop drops ticks and lengthens it in wall time; a buffered tick shortens it
+  by up to one tick.
+- **Not changed:** heartbeats and in-flight limits (phase 13 Step 1), the
+  check-quorum window, and `rejectStale` answering stale responses.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

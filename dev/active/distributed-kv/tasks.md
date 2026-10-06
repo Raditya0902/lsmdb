@@ -259,6 +259,19 @@ Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
   error, so an oversized response surfaces as "node is not the Raft leader".
   Found in item 6's receive-limit mutation.
 
+## Phase 12b Vote Lease
+
+Details: `dev/active/phase-12b-vote-lease/`. Branch `phase-12b-vote-lease`
+from `658cfa0`. Decision: D021 (proposed).
+
+- [x] Step 1 (docs): context, plan, tasks and D021. Re-verified `node.go`
+  `:153-159`, `:413-414` and `:447-462` (at `e1123fc`: `:142-147`,
+  `:401-402`, `:435-450`; the code is unchanged).
+- [ ] Step 2: `inLease()` and the vote check in `Step`, tests (i)–(v) first,
+  mutations for the guard tests. Waiting for approval.
+- [ ] Secondary Mac check: `clusterbench -mode failover` before and after,
+  interleaved, labeled secondary.
+
 ## Verification Log
 
 - 2026-08-26 — pre-change `go test ./...` — PASS.
@@ -419,9 +432,8 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Vote lease (D021), Step 1 (docs) on `phase-12b-vote-lease`, which stops for
-approval. Phase 12b hardening item 3 (the log format guard) comes last and is
-optional.
+Vote lease (D021): Step 1 is done and waits for approval before Step 2. Phase
+12b hardening item 3 (the log format guard) comes last and is optional.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

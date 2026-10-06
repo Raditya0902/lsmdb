@@ -347,14 +347,38 @@ here and "phase 12c" in D019 name the same prerequisite work.
   - The 3-repetition secondary check failed its 25% rule at 4 clients; the
     one-pass 10-repetition recheck passed (see the verification log). The
     two-mode throughput at 4 clients on the Mac is unexplained.
-- [ ] (f) Shared read probes. **Stop for review before any VM work.**
+- [x] Leader and follower split of log syncs (`46fed0f`), non-behavioral.
+  The two parts sum to the existing totals; clusterbench reports both per
+  window. Older arms lack the split, so it is reported for the final arm
+  only.
+- [x] Cap + 1 on the default queue (`88f232c`), test only. The default queue
+  stays 256 events: it also sizes the outgoing send queue, so raising it
+  would change backpressure in every arm.
+- [x] (f) Shared read probes (`b7ac098`; guard test `a76f182`).
+  - The reads queued when the leader handles a read share one probe and
+    complete together on its current-term quorum, at the commit index then
+    applied. If events are already deferred, only the reads at the head of
+    that list share it.
+  - A read that arrives after a probe was sent gets its own probe.
+  - **Reads may pass queued proposals (an argument, not a tested
+    property).** With nothing deferred, the leader drains the whole queue
+    for reads, so a read can be answered before proposals queued ahead of
+    it. Each such proposal is unacknowledged: its client has no response
+    yet, so the write is concurrent with the read and may be ordered after
+    it. A client that has its write's response has already seen it commit
+    and apply, so its next read arrives later and gets an index at least
+    the commit index at its arrival.
+  - **The final arm is `a76f182`;** it differs from `b7ac098` only by a
+    test.
 - [ ] VM comparison, after review and approval of the VM:
-  - arms: storm `bfa2a77`, copy `18369e8`, prerequisite `53b5d70`, new;
+  - arms: storm `bfa2a77`, copy `18369e8`, prerequisite `53b5d70`, final
+    `a76f182`;
   - 1, 4 and 16 clients, 5 repetitions: 60 runs.
 - [ ] Results and docs.
 
-Linearizability: phase 13 claims no coverage. The checker is separate work
-after phase 13.
+Linearizability: no linearizability checker exists in this repository, and
+phase 13 makes no linearizability claim. The tests above check single
+orderings by construction. The checker is separate work after phase 13.
 
 ## Verification Log
 
@@ -649,6 +673,34 @@ after phase 13.
     12–17. Entries per sync do not differ between the modes. Neither the
     cause nor whether coalescing changes the mode frequency is known; this
     check cannot separate them.
+- 2026-10-06, phase 13 sync split `46fed0f`:
+  - Failing first: the store and cluster tests found no syncs by role, and
+    the clusterbench test did not build (no `LeaderLogSyncs` field).
+  - Mutations: every sync attributed to the leader fails the store and
+    cluster tests; the report reading the leader part from the follower
+    counter fails the clusterbench test.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+- 2026-10-06, phase 13 cap + 1 `88f232c` (test only):
+  - Passes on the unchanged runtime (20 of 20): entries per persist
+    [1 256 1].
+  - Mutations: batch cap 255 gives [1 255 2]; no count cap gives [1 257]
+    (10 of 10).
+  - After the commit: all checks pass, 17 ok each.
+- 2026-10-06, phase 13 (f) `b7ac098` and guard `a76f182`:
+  - Failing first: `TestQueuedReadsShareOneProbe` (4 read contexts to node
+    2, want 1). `TestSharedProbeStillNeedsQuorum` passes on both, a guard.
+  - Mutations: one probe per read fails the first; completing on the
+    leader's own ack fails the second.
+  - `TestLateReadGetsItsOwnProbe` (`a76f182`) passes on `b7ac098` (20 of
+    20), so (f) has no such bug. A late read joining the earlier probe's
+    context fails it: `late read returned index 2 error <nil> on the
+    earlier probe's ack`.
+  - The read index is taken when the probe reaches quorum, not when the
+    read arrives; it is never below the commit index at arrival. This
+    predates (f).
+  - After each commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
 
 ## Blockers
 
@@ -660,9 +712,10 @@ authenticated registry remains deferred.
 Vote lease (D021) is done on `phase-12b-vote-lease`. Phase 12b hardening item
 3 (the log format guard) comes last and is optional, and is not started.
 
-Phase 13 (D022, accepted): (a) to (e) are done. Next: a leader and follower
-split of the sync counters, a test of cap + 1 proposals on the default queue,
-then (f) shared read probes. Stop after (f) for review before any VM work.
+Phase 13 (D022, accepted): (a) to (f) are built; the final arm is
+`a76f182`. Next: the user's review, then the pre-registered VM comparison
+(four arms, 60 runs, block in the local phase plan) only after approval of
+the VM, then results and docs.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

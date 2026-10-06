@@ -515,11 +515,18 @@ Consequences:
 
 ### D022 — One outstanding append per follower, then leader batches and follower coalescing
 
-Status: accepted 2026-10-05.
-- **Implemented so far:** rank 14 in `6aa09ce` and the in-flight limit in
-  `53b5d70`. Together they form the prerequisite arm.
-- **Not yet built:** leader batching, follower coalescing and shared read
-  probes follow as (d) to (f).
+Status: accepted 2026-10-05; built 2026-10-06; not yet measured.
+- **Built:**
+  - rank 14 in `6aa09ce` and the in-flight limit in `53b5d70`, which
+    together form the prerequisite arm;
+  - leader batching in `9cad487`;
+  - follower coalescing in `333eb24`;
+  - shared read probes in `b7ac098`.
+- **Final arm:** `a76f182`, which is `b7ac098` plus one test. Also on the
+  branch: a non-behavioral leader and follower split of the sync counters
+  (`46fed0f`) and a test of cap + 1 proposals (`88f232c`).
+- **Not yet measured:** the pre-registered VM comparison (P1–P7). The
+  results step records it and amends this entry if needed.
 - **Details:** in `dev/active/phase-13-group-commit/`, with line numbers at
   `d0e7c26`.
 
@@ -613,6 +620,22 @@ As built in `53b5d70` (where it differs from the proposal):
     0 elections and 0 failed writes in each run;
   - the `LSMDB_RACE_STRESS` skip and its `raceEnabled` constant are removed.
 
+As built in `b7ac098` (shared read probes):
+
+- **Which reads share a probe:** every read queued when the leader handles
+  one, drained without blocking. If earlier draining left events deferred,
+  only the reads at the head of that list share it, so other events keep
+  their order.
+- **Late reads:** a read that arrives after a probe was sent gets its own
+  probe (`a76f182` tests this).
+- **Read index:** taken when the probe reaches quorum, as before (f). It is
+  never below the commit index at the read's arrival.
+- **Reads may pass queued proposals.** A read can be answered before
+  proposals queued ahead of it. Each such proposal is unacknowledged, so
+  the write is concurrent with the read and may be ordered after it. This
+  is an argument; no linearizability checker exists, and phase 13 makes no
+  linearizability claim.
+
 Consequences (expected; the results step records what was measured):
 
 - **Catch-up:**
@@ -650,7 +673,7 @@ Consequences (expected; the results step records what was measured):
   - copy `18369e8`;
   - the prerequisite arm `53b5d70`, which splits the gain and enters no
     threshold;
-  - the phase 13 tip.
+  - the final arm `a76f182`.
 
   P7 requires the cluster tests, the in-memory concurrency test and A3 to
   pass at the final arm. A throughput gain with a correctness regression is

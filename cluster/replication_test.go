@@ -140,7 +140,7 @@ func proposeData(leader *memoryReplica, proposers, count int, data func(int) []b
 			defer wg.Done()
 			for i := p; i < count; i += proposers {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_, err := leader.runtime.Propose(ctx, data(i))
+				_, _, err := leader.runtime.Propose(ctx, data(i))
 				cancel()
 				if err != nil {
 					errs <- fmt.Errorf("write %d: %w", i, err)

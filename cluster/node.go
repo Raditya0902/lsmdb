@@ -292,17 +292,15 @@ func (h *handler) Delete(ctx context.Context, request *lsmdbv1.DeleteRequest) (*
 }
 
 func (h *handler) write(ctx context.Context, command []byte) (*lsmdbv1.WriteResponse, error) {
-	index, err := h.node.runtime.Propose(ctx, command)
+	// The term is the committed entry's own, so no status round trip through
+	// the event loop is needed (analysis report rank 14).
+	index, term, err := h.node.runtime.Propose(ctx, command)
 	if err != nil {
 		h.node.metrics.proposals.WithLabelValues("error").Inc()
 		return nil, h.node.rpcError(err)
 	}
 	h.node.metrics.proposals.WithLabelValues("committed").Inc()
-	current, err := h.node.runtime.Status(ctx)
-	if err != nil {
-		return nil, h.node.rpcError(err)
-	}
-	return &lsmdbv1.WriteResponse{Term: current.Term, LogIndex: index}, nil
+	return &lsmdbv1.WriteResponse{Term: term, LogIndex: index}, nil
 }
 
 func (n *Node) observeMetrics(ctx context.Context) {

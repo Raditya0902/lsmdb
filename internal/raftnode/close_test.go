@@ -54,7 +54,7 @@ func TestCloseReturnsAfterRuntimeStoppedItself(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, err = runtime.Propose(ctx, []byte("command"))
+		_, _, err = runtime.Propose(ctx, []byte("command"))
 		cancel()
 		if !errors.Is(err, errInjectedPersist) {
 			t.Fatalf("runtime %d: Propose error = %v, want the injected persist failure", i, err)

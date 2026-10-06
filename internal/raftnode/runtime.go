@@ -48,6 +48,7 @@ type Config struct {
 
 type proposalResult struct {
 	index uint64
+	term  uint64
 	err   error
 }
 
@@ -128,24 +129,25 @@ func Start(cfg Config, node *raft.Node, store StableStore, transport Transport, 
 	return runtime, nil
 }
 
-// Propose waits until a command is committed and locally applied.
-func (r *Runtime) Propose(ctx context.Context, command []byte) (uint64, error) {
+// Propose waits until a command is committed and locally applied. It returns
+// the command's log index and the term of the entry at that index.
+func (r *Runtime) Propose(ctx context.Context, command []byte) (index, term uint64, err error) {
 	result := make(chan proposalResult, 1)
 	event := proposalEvent{data: append([]byte(nil), command...), result: result}
 	select {
 	case r.events <- event:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, 0, ctx.Err()
 	case <-r.done:
-		return 0, raft.ErrStopped
+		return 0, 0, raft.ErrStopped
 	}
 	select {
 	case response := <-result:
-		return response.index, response.err
+		return response.index, response.term, response.err
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, 0, ctx.Err()
 	case <-r.done:
-		return 0, raft.ErrStopped
+		return 0, 0, raft.ErrStopped
 	}
 }
 
@@ -411,7 +413,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 	for _, entry := range update.Committed {
 		if entry.Index <= r.machine.AppliedIndex() {
 			if waiter, ok := pending[entry.Index]; ok {
-				waiter.result <- proposalResult{index: entry.Index}
+				waiter.result <- proposalResult{index: entry.Index, term: entry.Term}
 				delete(pending, entry.Index)
 			}
 			continue
@@ -431,7 +433,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 			return fmt.Errorf("apply committed entry %d: %w", entry.Index, err)
 		}
 		if waiter, ok := pending[entry.Index]; ok {
-			waiter.result <- proposalResult{index: entry.Index}
+			waiter.result <- proposalResult{index: entry.Index, term: entry.Term}
 			delete(pending, entry.Index)
 		}
 	}

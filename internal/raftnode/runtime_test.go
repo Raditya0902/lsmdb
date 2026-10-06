@@ -81,7 +81,7 @@ func TestRuntimePersistsThenAppliesProposal(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	index, err := runtime.Propose(ctx, []byte("command"))
+	index, _, err := runtime.Propose(ctx, []byte("command"))
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
@@ -101,6 +101,48 @@ func TestRuntimePersistsThenAppliesProposal(t *testing.T) {
 	hard, entries := store.Load()
 	if hard.Term == 0 || len(entries) != 2 || string(entries[1].Data) != "command" {
 		t.Fatalf("durable state hard=%+v entries=%#v", hard, entries)
+	}
+}
+
+// TestRuntimeProposeReturnsEntryTerm pins report rank 14: the write result
+// carries the term of the committed entry, so the write handler needs no
+// status round trip through the event loop.
+func TestRuntimeProposeReturnsEntryTerm(t *testing.T) {
+	store, err := raftstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Start at term 4 so the elected term (5) differs from any default.
+	node, err := raft.New(raft.Config{
+		ID: 1, Peers: []uint64{1}, ElectionTickMin: 2, ElectionTickMax: 4,
+		HeartbeatTicks: 1, CheckQuorumTicks: 2, RandomSeed: 1,
+	}, raft.HardState{Term: 4}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := raftnode.Start(raftnode.Config{TickInterval: time.Millisecond}, node, store, nil,
+		&memoryMachine{values: make(map[uint64]string)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	waitForStatus(t, runtime, func(status raft.Status) bool { return status.Role == raft.Leader })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	index, term, err := runtime.Propose(ctx, []byte("command"))
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	_, entries := store.Load()
+	var entryTerm uint64
+	for _, entry := range entries {
+		if entry.Index == index {
+			entryTerm = entry.Term
+		}
+	}
+	if entryTerm == 0 || term != entryTerm {
+		t.Fatalf("Propose returned index %d term %d; the entry at that index has term %d", index, term, entryTerm)
 	}
 }
 
@@ -131,7 +173,7 @@ func TestRuntimeAutomaticallySnapshotsAndCompacts(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, err := runtime.Propose(ctx, []byte("command")); err != nil {
+	if _, _, err := runtime.Propose(ctx, []byte("command")); err != nil {
 		t.Fatal(err)
 	}
 	status, err := runtime.Status(ctx)
@@ -249,7 +291,7 @@ func TestChangeMembershipCompletesWithConcurrentProposal(t *testing.T) {
 
 	proposalDone := make(chan result, 1)
 	go func() {
-		index, err := leader.Propose(ctx, []byte("write"))
+		index, _, err := leader.Propose(ctx, []byte("write"))
 		proposalDone <- result{index, err}
 	}()
 	waitForStatus(t, leader, func(status raft.Status) bool { return status.LastLogIndex > joint.LastLogIndex })

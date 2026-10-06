@@ -345,6 +345,15 @@ func (r *Runtime) run(tickInterval time.Duration) {
 				return
 			}
 		case messageEvent:
+			if event.message.Type == raft.MsgAppend && event.snapshotData == nil && len(deferred) == 0 {
+				var group []messageEvent
+				group, deferred = r.drainAppends(event)
+				if err := r.stepAppends(group, pending, pendingReads); err != nil {
+					r.fail(err, pending, pendingReads)
+					return
+				}
+				continue
+			}
 			err := r.processUpdateWithSnapshot(r.node.Step(event.message), event.snapshotData, pending, pendingReads)
 			if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
 				r.acknowledgeRead(event.message, pendingReads)
@@ -448,6 +457,97 @@ func (r *Runtime) proposeBatch(batch []proposalEvent, pending map[uint64]pending
 	return r.processUpdate(update, pending, pendingReads)
 }
 
+// drainAppends reads queued events without blocking and gathers appends from
+// first's sender into one group, up to maxBatchEntries entries, maxBatchBytes
+// accounted bytes or a queue's worth of events; the caps bound one persist,
+// since each append is already capped by its leader. Other events, and an
+// append that would overflow a cap, are returned in arrival order.
+func (r *Runtime) drainAppends(first messageEvent) (group []messageEvent, others []any) {
+	group = []messageEvent{first}
+	entries, size := appendLoad(first.message)
+	for drained := 0; drained < cap(r.events) && entries < maxBatchEntries && size < maxBatchBytes; drained++ {
+		var raw any
+		select {
+		case raw = <-r.events:
+		default:
+			return group, others
+		}
+		next, ok := raw.(messageEvent)
+		if !ok || next.snapshotData != nil || next.message.Type != raft.MsgAppend || next.message.From != first.message.From {
+			others = append(others, raw)
+			continue
+		}
+		count, bytes := appendLoad(next.message)
+		if entries+count > maxBatchEntries || size+bytes > maxBatchBytes {
+			return group, append(others, raw)
+		}
+		group = append(group, next)
+		entries, size = entries+count, size+bytes
+	}
+	return group, others
+}
+
+func appendLoad(message raft.Message) (entries, bytes int) {
+	for _, entry := range message.Entries {
+		bytes += len(entry.Data) + raft.EntryOverheadBytes
+	}
+	return len(message.Entries), bytes
+}
+
+// stepAppends steps a group of appends and persists them together (D022).
+// Updates that only append, commit and answer are merged into one persist;
+// one that changes hard state, truncates, installs a snapshot or changes role
+// ends the merge: the merged prefix is persisted first, then that update
+// alone. Every RPC completes after the persist that covers it, with its
+// error if that persist failed.
+func (r *Runtime) stepAppends(group []messageEvent, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
+	var merged raft.Update
+	var waiting []chan error
+	flush := func() error {
+		if len(waiting) == 0 {
+			return nil
+		}
+		err := r.processUpdate(merged, pending, pendingReads)
+		for _, result := range waiting {
+			result <- err
+		}
+		merged, waiting = raft.Update{}, nil
+		return err
+	}
+	failRest := func(rest []messageEvent, err error) error {
+		for _, event := range rest {
+			event.result <- err
+		}
+		return err
+	}
+	for i, event := range group {
+		update := r.node.Step(event.message)
+		if update.HardState == nil && update.TruncateFrom == 0 && update.Snapshot == nil && !update.RoleChanged {
+			logDroppedAppend(update.DroppedAppend)
+			merged.Entries = append(merged.Entries, update.Entries...)
+			merged.Messages = append(merged.Messages, update.Messages...)
+			merged.Committed = append(merged.Committed, update.Committed...)
+			waiting = append(waiting, event.result)
+			continue
+		}
+		if err := flush(); err != nil {
+			return failRest(group[i:], err)
+		}
+		err := r.processUpdate(update, pending, pendingReads)
+		event.result <- err
+		if err != nil {
+			return failRest(group[i+1:], err)
+		}
+	}
+	return flush()
+}
+
+func logDroppedAppend(reason string) {
+	if reason != "" {
+		log.Printf("raft: dropped malformed append %s", reason)
+	}
+}
+
 func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
 	return r.processUpdateWithSnapshot(update, nil, pending, pendingReads)
 }
@@ -465,9 +565,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 	if err != nil {
 		return fmt.Errorf("persist raft update: %w", err)
 	}
-	if update.DroppedAppend != "" {
-		log.Printf("raft: dropped malformed append %s", update.DroppedAppend)
-	}
+	logDroppedAppend(update.DroppedAppend)
 	if update.Snapshot != nil && r.machine.AppliedIndex() < update.Snapshot.Index {
 		reader, size, _, err := r.store.OpenSnapshot(update.Snapshot.Index)
 		if err != nil {

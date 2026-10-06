@@ -17,41 +17,68 @@ import (
 	"lsmdb/internal/raftstore"
 )
 
-// gateStore wraps a durable store. It can hold the next entry-carrying
-// Persist until released, and fail the n-th one; it records how many entries
-// each entry-carrying Persist wrote.
+// gateStore wraps a durable store. It can hold chosen entry-carrying
+// Persists until released, and fail the n-th one; it records how many entries
+// each entry-carrying Persist wrote and whether it carried hard state.
 type gateStore struct {
 	inner   raftnode.StableStore
 	entered chan struct{}
 	release chan struct{}
+	// stop releases every hold for good; closed at test cleanup, before the
+	// runtime is closed, so a failed test never leaves a persist held.
+	stop chan struct{}
 
 	mu      sync.Mutex
-	hold    bool
+	holds   map[int]bool
 	failAt  int
 	err     error
 	batches []int
+	calls   []persistCall
+}
+
+type persistCall struct {
+	entries   int
+	hardState bool
 }
 
 func newGateStore(inner raftnode.StableStore) *gateStore {
-	return &gateStore{inner: inner, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	return &gateStore{inner: inner, entered: make(chan struct{}, 1), release: make(chan struct{}), stop: make(chan struct{}), holds: map[int]bool{}}
 }
 
 func (s *gateStore) Persist(update raft.Update) error {
 	if len(update.Entries) > 0 {
 		s.mu.Lock()
 		s.batches = append(s.batches, len(update.Entries))
-		hold, fail := s.hold, s.failAt == len(s.batches)
-		s.hold = false
+		s.calls = append(s.calls, persistCall{entries: len(update.Entries), hardState: update.HardState != nil})
+		n := len(s.batches)
+		hold, fail := s.holds[n], s.failAt == n
 		s.mu.Unlock()
 		if hold {
 			s.entered <- struct{}{}
-			<-s.release
+			select {
+			case <-s.release:
+			case <-s.stop:
+			}
 		}
 		if fail {
 			return s.err
 		}
 	}
 	return s.inner.Persist(update)
+}
+
+func (s *gateStore) persistCalls() []persistCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]persistCall(nil), s.calls...)
+}
+
+// holdAfterNext holds the entry-carrying Persist k calls after the next one;
+// k = 0 is the next one.
+func (s *gateStore) holdAfterNext(k int) {
+	s.mu.Lock()
+	s.holds[len(s.batches)+1+k] = true
+	s.mu.Unlock()
 }
 
 func (s *gateStore) PersistSnapshot(update raft.Update, write func(io.Writer) error) error {
@@ -70,17 +97,20 @@ func (s *gateStore) entriesPerPersist() []int {
 	return append([]int(nil), s.batches...)
 }
 
-func (s *gateStore) holdNext() {
-	s.mu.Lock()
-	s.hold = true
-	s.mu.Unlock()
-}
+func (s *gateStore) holdNext() { s.holdAfterNext(0) }
 
 // startGatedLeader elects node 1 deterministically among the given voters,
 // persists and applies what the election produced, and starts its runtime on
 // a gate store with no transport. With three voters nothing commits, because
 // no follower ever answers.
 func startGatedLeader(t *testing.T, voters []uint64, machine raftnode.StateMachine, queueSize int) (*raftnode.Runtime, *gateStore) {
+	t.Helper()
+	return startGatedLeaderWith(t, voters, machine, queueSize, nil)
+}
+
+// startGatedLeaderWith is startGatedLeader with a transport for what the
+// leader sends.
+func startGatedLeaderWith(t *testing.T, voters []uint64, machine raftnode.StateMachine, queueSize int, transport raftnode.Transport) (*raftnode.Runtime, *gateStore) {
 	t.Helper()
 	store, err := raftstore.Open(t.TempDir())
 	if err != nil {
@@ -113,11 +143,12 @@ func startGatedLeader(t *testing.T, voters []uint64, machine raftnode.StateMachi
 		t.Fatalf("node 1 did not become leader: %+v", node.Status())
 	}
 	gate := newGateStore(store)
-	runtime, err := raftnode.Start(raftnode.Config{TickInterval: time.Millisecond, QueueSize: queueSize}, node, gate, nil, machine)
+	runtime, err := raftnode.Start(raftnode.Config{TickInterval: time.Millisecond, QueueSize: queueSize}, node, gate, transport, machine)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { close(gate.stop) }) // runs first
 	return runtime, gate
 }
 

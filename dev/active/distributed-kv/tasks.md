@@ -74,9 +74,8 @@ Phase details are in `dev/active/phase-12b-append-size-and-log-copy/`.
 
 ## In Progress
 
-- Phase 12b: Step 1 (docs and D019) approved 2026-10-05. The store limit is
-  raised to 4 MiB + 32 KiB, and test 5 runs over localhost gRPC. Item 1 and item 2
-  fixes in progress.
+- Phase 12b: both fixes are committed. The official three-arm VM comparison is
+  next, and waits for approval.
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -166,11 +165,15 @@ Phase details are in `dev/active/phase-12b-append-size-and-log-copy/`.
 
 Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
 
-- [ ] Item 1: byte-capped AppendEntries (about 1 MiB, at least one entry), one
-  entry-size limit across proposal, store and transport, and a `nextIndex` floor
-  on rejection. Tests include the report A3 repro and a 4 MiB value.
-- [ ] Item 2: follower copies and rescans its log only on truncation or a
-  configuration entry.
+- [x] Item 1: byte-capped AppendEntries (1 MiB, at least one entry), one entry-size
+  limit (4 MiB + 32 KiB) across proposal, store and transport, and a `nextIndex`
+  floor on rejection (`8c8a317`).
+  - The report A3 run over localhost gRPC went from 16 elections to 0.
+  - A 4 MiB value commits.
+  - An oversized Put returns `InvalidArgument`, and the leader keeps serving.
+- [x] Item 2: the follower copies and rescans its log only on truncation or a
+  configuration entry. A heartbeat to a follower holding 100,000 entries went
+  from 5.6 MB and 1.8 ms to 336 B and 0.5 µs.
 - [ ] Official three-arm VM comparison (base, cap, copy), copy-arm duration sweep
   and the large-value run, judged against the thresholds pre-registered in the
   phase plan.
@@ -258,6 +261,13 @@ Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
   `-race` — PASS.
 - 2026-10-05 — phase 11: clusterbench at 1 and 4 clients, main vs branch,
   interleaved — no regression. This was a sanity check, not a benchmark result.
+
+- 2026-10-05, phase 12b:
+  - After each of `bc8e7c7`, `8c8a317` and the item 2 commit: gofmt clean,
+    `go vet ./...` plus each script, and `go test -count=1 ./...` and
+    `go test -count=1 -race ./...` pass.
+  - The item 2 cost test passed 20 of 20 runs under `-race`, with time ratios
+    0.50–1.08 against a bound of 3.
 
 ## Blockers
 

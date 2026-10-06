@@ -86,9 +86,6 @@ func equalCommitIndexes(statuses map[uint64]raft.Status) bool {
 // write 24 values of 2.5 MiB. Uncapped appends that carry two such entries
 // exceed the 4 MiB + 64 KiB receive limit, so a follower hears nothing.
 func TestLargeValueWritesKeepOneLeader(t *testing.T) {
-	if raceEnabled {
-		t.Skip("until phase-12b item 2: under -race, each follower's per-append deep copy of a log of up to 60 MiB stalls replication")
-	}
 	const clients, writes, valueSize = 4, 24, 5 << 19
 	nodes, addresses := startGRPCCluster(t)
 	waitForLeader(t, nodes, 0)

@@ -34,8 +34,12 @@ func encodeMembership(command membershipCommand) []byte {
 	return append(append([]byte(nil), membershipPrefix...), data...)
 }
 
+// hasMembershipPrefix reports whether data claims to be a configuration entry,
+// valid or not, without decoding it.
+func hasMembershipPrefix(data []byte) bool { return bytes.HasPrefix(data, membershipPrefix) }
+
 func decodeMembership(data []byte) (membershipCommand, bool, error) {
-	if !bytes.HasPrefix(data, membershipPrefix) {
+	if !hasMembershipPrefix(data) {
 		return membershipCommand{}, false, nil
 	}
 	var command membershipCommand

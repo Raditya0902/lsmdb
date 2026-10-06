@@ -487,10 +487,12 @@ func (n *Node) handleAppend(message Message) Update {
 		return update
 	}
 
-	oldLog := make([]Entry, len(n.log))
-	for i := range n.log {
-		oldLog[i] = cloneEntry(n.log[i])
-	}
+	// Entries are never modified in place, so undoing this append needs only the
+	// old length and any truncated tail. Membership is the fold over the log, so
+	// it changes only on truncation or an appended configuration entry (D019).
+	oldLen := len(n.log)
+	var truncatedTail []Entry
+	rebuild := false
 	for i, entry := range message.Entries {
 		expected := message.LogIndex + uint64(i) + 1
 		if entry.Index != expected || entry.Term == 0 {
@@ -508,21 +510,27 @@ func (n *Node) handleAppend(message Message) Update {
 				update.Messages = append(update.Messages, Message{Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.commit + 1})
 				return update
 			}
-			n.log = n.log[:entry.Index-n.snapshot.Index-1]
+			keep := entry.Index - n.snapshot.Index - 1
+			truncatedTail = append([]Entry(nil), n.log[keep:]...)
+			n.log = n.log[:keep]
 			update.TruncateFrom = entry.Index
+			rebuild = true
 		}
 		for _, remaining := range message.Entries[i:] {
+			rebuild = rebuild || hasMembershipPrefix(remaining.Data)
 			n.log = append(n.log, cloneEntry(remaining))
 			update.Entries = append(update.Entries, cloneEntry(remaining))
 		}
 		break
 	}
-	if err := n.rebuildMembership(); err != nil {
-		n.log = oldLog
-		update.TruncateFrom = 0
-		update.Entries = nil
-		update.Messages = append(update.Messages, Message{Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.lastIndex() + 1})
-		return update
+	if rebuild {
+		if err := n.rebuildMembership(); err != nil {
+			n.log = append(n.log[:oldLen-len(truncatedTail)], truncatedTail...)
+			update.TruncateFrom = 0
+			update.Entries = nil
+			update.Messages = append(update.Messages, Message{Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.lastIndex() + 1})
+			return update
+		}
 	}
 
 	// LogIndex is the previous index, so lastNew is the last entry this message proved.

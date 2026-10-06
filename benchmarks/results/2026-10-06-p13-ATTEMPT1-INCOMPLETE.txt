@@ -1,0 +1,2 @@
+INCOMPLETE: attempt 1 stopped at run 43 of 60 on a harness port race (complete: false).
+Files: p13-compare-attempt1.json, stage1-attempt1.log, p13/runs/. Not analyzed; attempt 2 is official.

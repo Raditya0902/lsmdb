@@ -1,0 +1,32 @@
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:196: 0 of 24 writes failed; 0 elections among the 3 of 3 nodes that answered
+--- PASS: TestLargeValueWritesKeepOneLeader (2.27s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:196: 0 of 24 writes failed; 0 elections among the 3 of 3 nodes that answered
+--- PASS: TestLargeValueWritesKeepOneLeader (1.87s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:196: 0 of 24 writes failed; 0 elections among the 3 of 3 nodes that answered
+--- PASS: TestLargeValueWritesKeepOneLeader (1.92s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:196: 0 of 24 writes failed; 0 elections among the 3 of 3 nodes that answered
+--- PASS: TestLargeValueWritesKeepOneLeader (1.89s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:190: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:196: 0 of 24 writes failed; 0 elections among the 3 of 3 nodes that answered
+--- PASS: TestLargeValueWritesKeepOneLeader (1.94s)
+PASS
+ok  	lsmdb/cluster	9.986s

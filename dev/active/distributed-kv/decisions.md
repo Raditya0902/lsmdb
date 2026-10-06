@@ -515,7 +515,8 @@ Consequences:
 
 ### D022 — One outstanding append per follower, then leader batches and follower coalescing
 
-Status: accepted 2026-10-05; built 2026-10-06; not yet measured.
+Status: accepted 2026-10-05; built 2026-10-06; measured 2026-10-06 (VM,
+P1–P7 all PASS; see "Results" below).
 - **Built:**
   - rank 14 in `6aa09ce` and the in-flight limit in `53b5d70`, which
     together form the prerequisite arm;
@@ -525,8 +526,10 @@ Status: accepted 2026-10-05; built 2026-10-06; not yet measured.
 - **Final arm:** `a76f182`, which is `b7ac098` plus one test. Also on the
   branch: a non-behavioral leader and follower split of the sync counters
   (`46fed0f`) and a test of cap + 1 proposals (`88f232c`).
-- **Not yet measured:** the pre-registered VM comparison (P1–P7). The
-  results step records it and amends this entry if needed.
+- **Measured:** the pre-registered VM comparison (P1–P7) and the
+  large-value stage, results in `a503f42`
+  (`benchmarks/results/2026-10-06-p13-*`). Nothing in this entry needed
+  amending.
 - **Details:** in `dev/active/phase-13-group-commit/`, with line numbers at
   `d0e7c26`.
 
@@ -679,6 +682,56 @@ Consequences (expected; the results step records what was measured):
   pass at the final arm. A throughput gain with a correctness regression is
   a miss. Phase 13 claims no linearizability coverage; the checker is
   separate work after phase 13.
+
+Results (measured 2026-10-06, `benchmarks/results/2026-10-06-p13-compare.json`):
+
+- **Setup:**
+  - GCE e2-standard-4 with a 100 GB pd-ssd boot disk (network storage);
+  - three nodes in one process on one disk;
+  - closed-loop clients, 128-byte values;
+  - official protocol (5 s warmup, 30 s window, 5 repetitions, arms
+    interleaved).
+  - 60 of 60 runs valid, 0 elections in any window, 0 failed operations.
+- **Thresholds, final against copy (median [min, max]), all PASS:**
+  - P2: 6.31 [6.29, 6.33] entries per log sync at 16 clients (0.47 syncs
+    per committed entry, against 3.00).
+  - P3: 1.62 [1.60, 1.64] at 4 clients, against copy's 1.00.
+  - P4: 1531.7 [1477.1, 1575.7] ops/s at 16 clients against 419.4 [410.0,
+    442.4], ×3.652, ranges disjoint.
+  - P5: ×1.278 at 4 clients, ranges disjoint.
+  - P6: 1-client p50 ×0.997 and throughput ×1.006.
+  - P1 and P7 also pass. A3 passed 5 of 5 on the prerequisite and final arms
+    on the VM, with no hangs.
+- **Attribution:** the headline is "from `18369e8` to the final arm"; that
+  range also holds D020 and D021. Against the prerequisite arm, batching is
+  credited at 16 clients only: ×2.910 throughput, ranges disjoint. At 4
+  clients (×1.109) and 1 client (×0.973) the ranges overlap, so nothing is
+  credited there.
+- **Final arm, leader and follower entries per sync:**
+  - 1.13 and 2.06 at 4 clients;
+  - 4.03 and 8.82 at 16 clients.
+  The followers coalesce more than the leader batches.
+- **Caveats:**
+  - **Tail above p99 at 16 clients:** final's p99.9 is 363.2 [352.1,
+    385.2] ms and its max 412.2 ms, about twice copy's 174.6 and 201.0 ms,
+    while its p99 is 19.7 against 75.4 ms. The cause is unknown. No claim
+    is made beyond p99.
+  - **Deadline failures:** one final run (16 clients, repetition 3) had 5
+    deadline send failures, against an expected 0, with 0 elections and 0
+    failed operations.
+  - **Platform dependence:** the gain depends on what a log sync costs. The
+    pd-ssd here is network storage. Its 4 KiB fsync p50, sampled before
+    and after each run, was 1.40–2.98 ms (median 1.73) across all 120
+    samples. A disk with a cheaper or a more expensive fsync, another
+    platform, or a multi-machine cluster would give different numbers.
+    These numbers are not comparable to the Mac or to other platforms.
+  - **P7's `-race` evidence** comes from the Mac at `21be5d5`, not the VM.
+  - **Linearizability:** none claimed. Reads (shared probes) are covered by
+    tests only, because clusterbench issues only writes.
+  - **Attempt 1:** stage 1 first stopped at run 43 of 60 on a harness port
+    race, before that run's measurement window. One re-run was approved, and
+    the partial attempt is committed only with its INCOMPLETE label, not
+    analyzed.
 
 ## Decision Changes
 

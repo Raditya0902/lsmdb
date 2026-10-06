@@ -4,11 +4,11 @@ Last updated: 2026-10-06
 
 ## Current Phase
 
-Phase 13 (Raft group commit, D022) is built and waiting for its VM run, on
-branch `phase-13-group-commit`, created from `d0e7c26`
+Phase 13 (Raft group commit, D022) is built and measured, on branch
+`phase-13-group-commit`, created from `d0e7c26`
 (`dev/active/phase-13-group-commit/`). The final arm is `a76f182`. The
-pre-registered VM comparison (thresholds P1–P7) has not run; D022 is not yet
-measured.
+pre-registered VM comparison passed all of P1–P7 on 2026-10-06 (results in
+`a503f42`); D022 is measured. Follow-up work is under "After Phase 13".
 
 Phases 11, 10, 12a and 12b are complete on stacked branches:
 `phase-11-correctness-fixes`, then `phase-10-benchmark-harness-v2`, then
@@ -77,9 +77,8 @@ and not started. None is merged into `main` (`bd67696`) yet.
 
 ## In Progress
 
-- Phase 13: (a) to (f) are built. Waiting for the pre-registered VM
-  comparison (four arms, 60 runs) and the large-value stage; then results
-  and docs.
+- None. Phase 13 is built and measured; the stack (phase 11 to phase 13)
+  waits to be pushed and merged.
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -312,8 +311,9 @@ Findings (not fixed on this branch):
 ## Phase 13 — Raft Group Commit
 
 Details: `dev/active/phase-13-group-commit/`. Branch `phase-13-group-commit`
-from `d0e7c26`. Decision: D022 (accepted 2026-10-05). "Phase 13 Step 1"
-here and "phase 12c" in D019 name the same prerequisite work.
+from `d0e7c26`. Decision: D022 (accepted 2026-10-05, measured
+2026-10-06). "Phase 13 Step 1" here and "phase 12c" in D019 name the same
+prerequisite work.
 
 - [x] Step 1 (docs): context, plan, tasks and D022 (`4495dfa`).
   - Re-verified every location in analysis report §2A at `d0e7c26`.
@@ -368,15 +368,89 @@ here and "phase 12c" in D019 name the same prerequisite work.
     the commit index at its arrival.
   - **The final arm is `a76f182`;** it differs from `b7ac098` only by a
     test.
-- [ ] VM comparison, after review and approval of the VM:
-  - arms: storm `bfa2a77`, copy `18369e8`, prerequisite `53b5d70`, final
-    `a76f182`;
-  - 1, 4 and 16 clients, 5 repetitions: 60 runs.
-- [ ] Results and docs.
+- [x] Official four-arm VM comparison and large-value stage (2026-10-06),
+  judged against the thresholds pre-registered in the phase plan. Results
+  committed in `a503f42` (`benchmarks/results/2026-10-06-p13-*`).
+  - Arms: storm `bfa2a77`, copy `18369e8`, prerequisite `53b5d70`, final
+    `a76f182`. 1, 4 and 16 clients, 5 repetitions, 60 runs.
+  - Setup: GCE e2-standard-4 with a 100 GB pd-ssd boot disk (network
+    storage). Official protocol (5 s warmup, 30 s window, arms
+    interleaved).
+  - 60 of 60 runs valid, 0 elections in any window, 0 failed operations.
+  - **All seven thresholds PASS** (final against copy, median [min, max]):
+    - P1: complete, 30 of 30 copy and final runs valid.
+    - P2: 6.31 [6.29, 6.33] entries per log sync at 16 clients, need
+      ≥ 2.0.
+    - P3: 1.62 [1.60, 1.64] at 4 clients, need ≥ 1.10; min above copy's
+      max of 1.00.
+    - P4: 1531.7 [1477.1, 1575.7] ops/s against 419.4 [410.0, 442.4] at
+      16 clients, ×3.652, need ≥ 1.5; ranges disjoint.
+    - P5: 559.3 against 437.5 at 4 clients, ×1.278, need ≥ 0.95; ranges
+      disjoint.
+    - P6: 1-client p50 ×0.997 (need ≤ 1.10), throughput ×1.006 (need
+      ≥ 0.90).
+    - P7: A3 passed 5 of 5 on prerequisite and on final on the VM; copy
+      passed 5 of 5; storm passed 0 of 5 as expected (12–23 elections per
+      run); no hangs. `go test ./...` passed on the VM. The `-race`
+      evidence is from the Mac at `21be5d5`.
+    - The environment check is in band: copy's 4-client median is 437.5
+      (374.7–506.9).
+  - **Attribution:**
+    - The headline is "from `18369e8` to the final arm"; that range also
+      holds D020 and D021.
+    - Final against prerequisite (batching) is credited at 16 clients
+      only: ×2.910, ranges disjoint.
+    - At 4 clients (×1.109) and 1 client (×0.973) the ranges overlap, so
+      nothing is credited there.
+  - **Reported, not judged:**
+    - Final's leader and follower entries per sync: 1.13 / 2.06 at 4
+      clients, 4.03 / 8.82 at 16.
+    - Final's throughput rises from 234.6 to 559.3 to 1531.7 ops/s at 1,
+      4 and 16 clients.
+  - **Caveats:**
+    - Final's p99.9 at 16 clients is 363.2 [352.1, 385.2] ms and its max
+      412.2 ms, about twice copy's (174.6, 201.0), while its p99 is 19.7
+      against 75.4 ms. The cause is unknown, and no claim is made beyond
+      p99.
+    - 5 deadline send failures in one final run (16 clients, repetition
+      3), expected 0, with 0 elections and 0 failed operations there.
+    - The gain depends on the platform and on fsync cost (pd-ssd 4 KiB
+      fsync p50 1.40–2.98 ms). It is not comparable to the Mac or to other
+      platforms.
+    - No linearizability claim.
+  - **Attempt 1:** stage 1 first stopped at run 43 of 60 on the harness
+    port race (see "After Phase 13"), before that run's measurement window.
+    The user approved one re-run as a one-time exception; attempt 2 is the
+    official run. The partial file is committed only with its INCOMPLETE
+    label and was not analyzed.
+- [x] Results and docs: D022 measured; this tracker.
 
 Linearizability: no linearizability checker exists in this repository, and
 phase 13 makes no linearizability claim. The tests above check single
 orderings by construction. The checker is separate work after phase 13.
+
+## After Phase 13
+
+Not fixed. Each item is its own change, after the stack is merged.
+
+- [ ] **Harness port race.** clusterbench's `freeAddress`
+  (`cmd/clusterbench/run.go:182-189`) closes its listener before the node
+  binds the port, so another socket can take it ("bind: address already in
+  use"). It stopped phase 13's first stage 1 attempt at run 43 of 60. The
+  fix is harness-only, with a test. It must be identical for all arms, or
+  live in the driver, so that arms built from older commits get it too.
+- [ ] **Split-vote timeout.** Equal election timeout draws can repeat (see
+  "Phase 12b Vote Lease", findings): a deterministic generator taken modulo
+  5 and seeded with the node ID alone. Candidate fixes: a wider range, or
+  seeding by node ID and term.
+- [ ] **Raft log format guard** (phase 12b hardening item 3, D020).
+  Optional, and last.
+- [ ] **Linearizability checker.** Phase 13 and earlier phases make no
+  linearizability claim beyond the single-ordering tests.
+- [ ] **p99.9 tail at 16 clients.** Final's p99.9 and max are about twice
+  copy's while its p99 is a quarter of copy's. The cause is unknown and was
+  not investigated. Candidates to check: batch-sized persists at the cap,
+  and compaction volume (final commits about 3.7× the entries per window).
 
 ## Verification Log
 
@@ -699,6 +773,29 @@ orderings by construction. The checker is separate work after phase 13.
     predates (f).
   - After each commit: gofmt clean, `go vet ./...`, `go test ./...` and
     `-race` all pass, 17 ok each.
+- 2026-10-06, phase 13 VM run (results `a503f42`):
+  - **Setup checks:**
+    - Go tarball hash matches go.dev.
+    - Bundle hash matches, and the clone tip is `21be5d5`.
+    - nproc = nproc --all = 4, `cpu.max` is `max 100000`, and
+      `go test ./...` passes.
+  - **Pre-flight before each stage:** tip `21be5d5`, clean tree, nothing
+    running, and two consecutive 1-minute load readings under 0.5.
+  - **Stage 1, attempt 2:**
+    - exited 0, `complete: true`;
+    - `vm_smoke_check` passes all ten checks, with `-forbid` for the VM
+      hostname, username and project id.
+  - **Stage 2:** A3 `-count=5` per arm in 10–88 s, with no hangs.
+  - **Retrieval:**
+    - 114 files match the VM's SHA256SUMS.
+    - The copies committed in `a503f42` match it too.
+    - The grep for hostname, project id, username, `/home/`, `/Users/`,
+      `.internal` and IPv4 finds nothing in the committed files.
+  - **Teardown:** the VM was deleted with its disk. Instances, disks,
+    addresses, snapshots and custom images list 0 items.
+  - **After `a503f42` and the docs commit:** gofmt (no Go files changed),
+    `go vet ./...`, `go test ./...` and `go test -race ./...` pass, 17 ok
+    each.
 
 ## Blockers
 
@@ -710,11 +807,11 @@ authenticated registry remains deferred.
 Vote lease (D021) is done on `phase-12b-vote-lease`. Phase 12b hardening item
 3 (the log format guard) comes last and is optional, and is not started.
 
-Phase 13 (D022, accepted): (a) to (f) are built; the final arm is
-`a76f182`. Next: the user's review, then the pre-registered VM comparison
-(four arms, 60 runs, block in the local phase plan) only after approval of
-the VM, then results and docs.
+Phase 13 (D022) is built and measured: P1–P7 all PASS (`a503f42`).
 
-The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
-stack and merged with merge commits, in that order.
+The stack is to be pushed and merged with merge commits, in this order:
+`phase-11-correctness-fixes`, `phase-10-benchmark-harness-v2`,
+`phase-12a-dup-ack-fix`, `phase-12b-append-size-and-log-copy`,
+`phase-12b-hardening`, `phase-12b-vote-lease`, `phase-13-group-commit`.
+After it is merged, the next work comes from "After Phase 13".
 Optional stale follower reads remain deferred.

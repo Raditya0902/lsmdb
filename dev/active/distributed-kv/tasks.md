@@ -4,15 +4,15 @@ Last updated: 2026-10-05
 
 ## Current Phase
 
-Phase 12b (AppendEntries size cap and follower log copy, D019) is in design on
-branch `phase-12b-append-size-and-log-copy`, created from the phase-12a tip
-`6d6dda7`.
+Phase 12b hardening (six small fixes, D020) is in progress on branch
+`phase-12b-hardening`, created from the phase-12b evidence commit `ca35b90`.
 
-Phases 11, 10 and 12a are complete on stacked branches:
+Phases 11, 10, 12a and 12b are complete on stacked branches:
 `phase-11-correctness-fixes`, then `phase-10-benchmark-harness-v2`, then
-`phase-12a-dup-ack-fix`. None is merged into `main` (`bd67696`) yet.
+`phase-12a-dup-ack-fix`, then `phase-12b-append-size-and-log-copy`. None is
+merged into `main` (`bd67696`) yet.
 
-Phase details are in `dev/active/phase-12b-append-size-and-log-copy/`.
+Phase details are in `dev/active/phase-12b-hardening/`.
 
 ## Completed
 
@@ -74,8 +74,8 @@ Phase details are in `dev/active/phase-12b-append-size-and-log-copy/`.
 
 ## In Progress
 
-- Phase 12b: both fixes are committed. The official three-arm VM comparison is
-  next, and waits for approval.
+- Phase 12b hardening: Step 1 approved 2026-10-05. Commits in the order 0, 1, 2,
+  5, 4, 6, 3; item 3 is gated on an old-binary check (D020).
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -174,9 +174,38 @@ Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
 - [x] Item 2: the follower copies and rescans its log only on truncation or a
   configuration entry. A heartbeat to a follower holding 100,000 entries went
   from 5.6 MB and 1.8 ms to 336 B and 0.5 µs.
-- [ ] Official three-arm VM comparison (base, cap, copy), copy-arm duration sweep
+- [x] Official three-arm VM comparison (base, cap, copy), copy-arm duration sweep
   and the large-value run, judged against the thresholds pre-registered in the
-  phase plan.
+  phase plan. Results committed in `ca35b90`
+  (`benchmarks/results/2026-10-05-p12b-*`).
+  - **Passed:** item 1 small values; the item 2 sweep (−0.26% appends/entry,
+    +2.19% ops/s from 10 to 60 s); item 2 throughput and p99 at every client
+    count; p99.9 at 1, 2 and 16 clients; 0 invalid runs, 0 elections; about 3
+    log syncs per entry.
+  - **p99.9 at 8 clients: MISS** (copy min 106.89 > cap max 106.37 ms). Copy
+    commits about 3× the entries per window, so this is not a like-for-like
+    percentile. Compaction volume is the likely cause (correlational).
+  - **p99.9 at 4 clients: INCONCLUSIVE.**
+  - **Large values, cap arm alone: MISS, 0 of 5.** Copy 5 of 5; base 0 of 5 with
+    15–19 elections. `8c8a317` and `18369e8` ship together; bisect skips
+    `8c8a317`.
+
+## Phase 12b Hardening
+
+Details: `dev/active/phase-12b-hardening/`. Decision: D020 (accepted, gated).
+Items in commit order:
+
+- [ ] The large-value test logs every node's term and commit index before
+  failing.
+- [ ] Flush and compaction counted and timed in the engine; per-window deltas in
+  clusterbench JSON (`bench_compare summarize` unchanged).
+- [ ] `Runtime.Close` returns after the runtime has stopped itself (still nil).
+- [ ] Every entry of an incoming append validated before any in-memory change
+  (index, term > 0, size, terms non-decreasing, at least `LogTerm`, at most the
+  message term). A violation is dropped, counted and logged, with no reject.
+- [ ] The client's message limit uses the server constant.
+- [ ] Raft log format guard: versioned file, `raft.log` guard directory,
+  refusal instead of truncation (D020), after the old-binary gate.
 
 ## Verification Log
 
@@ -268,6 +297,8 @@ Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
     `go test -count=1 -race ./...` pass.
   - The item 2 cost test passed 20 of 20 runs under `-race`, with time ratios
     0.50–1.08 against a bound of 3.
+  - After `9213d83`, `f895b7e`, `0c9298e` and the results commit `ca35b90`: the
+    same suite passes.
 
 ## Blockers
 
@@ -276,12 +307,10 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Phase 12b, after approval:
-- commit (a), docs;
-- (b), the item 1 fix;
-- (c), the item 2 fix;
-- then the three-arm VM comparison in the phase plan.
+Phase 12b hardening: commit 0 (D020 and the tracker), then items 1, 2, 5, 4, 6
+and 3 as separate commits, tests first, as in
+`dev/active/phase-12b-hardening/plan.md`.
 
-The phase-11, phase-10 and phase-12a branches are to be pushed as a stack and
-merged with merge commits, in that order.
+The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
+stack and merged with merge commits, in that order.
 Optional stale follower reads remain deferred.

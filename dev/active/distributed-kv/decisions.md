@@ -333,6 +333,101 @@ Consequences:
   `LogIndex` stay in 12c. Each must keep a catch-up path that satisfies the bound
   above.
 
+### D020 — The Raft log is versioned, and a binary refuses a log it cannot read instead of truncating it
+
+Status: accepted 2026-10-05 (phase 12b hardening), conditional on the gate
+below. If the gate fails, option B applies instead and this entry is amended to
+say that pre-12b binaries are unprotected.
+
+Context:
+
+- **D019 made downgrades destructive.** Recovery treats every unexpected record
+  as a torn tail. A record longer than the reader's limit, term 0, an index gap,
+  a wrong first index or a CRC mismatch all end the read there, and `Open`
+  truncates `raft.log` at that offset (`internal/raftstore/store.go:66, 276-296`).
+  A binary from before D019 truncates a log holding an entry above 4 MiB, along
+  with every later entry, committed or not.
+- **A header alone cannot help binaries already built.** They parse the first
+  bytes of `raft.log` as a record. A header there fails their checks at
+  offset 0, so they would truncate the whole log to zero bytes.
+- **Those binaries do fail cleanly on a directory.** They open `raft.log` with
+  `O_RDWR|O_CREATE` (`store.go:56`). On a directory that returns "is a
+  directory", and `Open` stops before reading or writing.
+- **A node opens more than the Raft log.** At `bd67696`, `StartNode` opens the
+  LSM state machine (`state/`) before the Raft store, so the guard protects the
+  whole data directory only if that earlier open writes nothing. The gate checks
+  exactly this.
+
+Decision:
+
+1. **The log moves to `raft-log.v1`.** It starts with a 16-byte header:
+   - an 8-byte magic, `LSMDBRL\x00`;
+   - a 4-byte big-endian format version, starting at 1;
+   - a CRC32 of those 12 bytes.
+
+   Records keep the existing encoding after the header.
+2. **`raft.log` becomes an empty directory, the guard.** Binaries from before
+   this decision then fail to open the store.
+3. **A binary refuses, with an explicit error and no write:**
+   - an unknown magic;
+   - a version above the one it knows;
+   - a record that is complete on disk, with a matching CRC, but longer than its
+     entry limit.
+
+   A short or CRC-failing final record is still a torn tail and is truncated.
+4. **A headerless `raft.log` from before this decision is migrated on first
+   open.** Each step is durable before the next:
+   1. read the old log, with the rules above;
+   2. publish `raft-log.v1` by tmp, fsync, rename and directory fsync;
+   3. read `raft-log.v1` back and compare its records byte for byte with the
+      old log's verified records, stopping with an error on any difference;
+   4. rename `raft.log` to `raft.log.premigration`, then fsync the directory;
+   5. create the guard, then fsync the directory.
+
+   An interrupted migration resumes from the files present. Any layout that
+   cannot be explained as an interrupted migration is an explicit error that
+   names the files, and nothing is touched.
+5. **`raft.log.premigration` is never deleted automatically.** It is the
+   pre-upgrade log, kept for the operator, who removes it once the upgrade is
+   trusted.
+6. **Any later change to the record encoding or to `raft.MaxEntryBytes`
+   increments the version.**
+
+Gate, before item 3 is committed:
+
+- Build `lsmdb-node` from `bd67696` and run it twice:
+  - against a freshly migrated data directory;
+  - against one created and used by the new code.
+- Compare every file's hash and mtime, and every directory listing, before and
+  after each run.
+- **Passing:** the old binary refuses to start, and nothing other than the
+  guard path changes. Any other change, including a manifest timestamp, fails
+  the gate, and option B applies.
+
+Consequences:
+
+- **Upgrade:** nodes can be upgraded in any order, one at a time. The first open
+  rewrites the retained log once and reads it back. The retained log's size is
+  bounded by the snapshot threshold.
+- **Disk:** `raft.log.premigration` keeps a copy of the pre-upgrade log until an
+  operator removes it.
+- **Downgrade below this decision:** the older binary refuses to start, with
+  "is a directory". There is one exception: after a crash between migration
+  steps 4 and 5, an older binary sees no `raft.log` and creates an empty one.
+  Then either `raft.New` refuses (the applied index is above the snapshot
+  index), or the node starts with an empty log. The versioned file is untouched
+  either way.
+  - On the next guard-aware open, an empty `raft.log` file is removed and the
+    guard created.
+  - A non-empty one is an explicit error that names the files.
+- **Downgrade between versions that both have the guard:** the older binary
+  refuses the newer version.
+- **Not covered:**
+  - `SNAPSHOT` and `HARDSTATE` stay unversioned.
+  - A mid-file anomaly other than an over-limit record still truncates.
+  - There is no supported downgrade path: a refused node needs its newer binary
+    back.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

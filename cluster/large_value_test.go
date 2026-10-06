@@ -222,7 +222,8 @@ func TestMaxSizeValueCommitsAndReplicates(t *testing.T) {
 	defer client.Close()
 	key := bytes.Repeat([]byte{'k'}, kvstate.MaxKeyBytes)
 	value := bytes.Repeat([]byte{'v'}, kvstate.MaxValueBytes)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Generous: a 4 MiB Put under -race on a loaded CI runner took over 20 s once.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	response, err := client.Put(ctx, key, value)
 	if err != nil {

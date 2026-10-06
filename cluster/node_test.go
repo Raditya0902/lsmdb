@@ -124,11 +124,15 @@ func TestThreeNodeWriteReadFailoverAndRecovery(t *testing.T) {
 }
 
 func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
+	const snapshotThreshold = 3
+	// fillerWrites (threshold - 1) more entries after lastIndex guarantee a
+	// snapshot at or past lastIndex, whatever index the last snapshot took.
+	const fillerWrites = snapshotThreshold - 1
 	addresses := map[uint64]string{1: freeAddress(t), 2: freeAddress(t), 3: freeAddress(t)}
 	configs := make(map[uint64]NodeConfig)
 	nodes := make(map[uint64]*Node)
 	for id := uint64(1); id <= 3; id++ {
-		configs[id] = NodeConfig{ID: id, ListenAddress: addresses[id], DataDir: fmt.Sprintf("%s/node-%d", t.TempDir(), id), Peers: addresses, TickInterval: 20 * time.Millisecond, ElectionTickMin: 5, ElectionTickMax: 10, HeartbeatTicks: 1, CheckQuorumTicks: 5, SnapshotThreshold: 3}
+		configs[id] = NodeConfig{ID: id, ListenAddress: addresses[id], DataDir: fmt.Sprintf("%s/node-%d", t.TempDir(), id), Peers: addresses, TickInterval: 20 * time.Millisecond, ElectionTickMin: 5, ElectionTickMax: 10, HeartbeatTicks: 1, CheckQuorumTicks: 5, SnapshotThreshold: snapshotThreshold}
 		node, err := StartNode(configs[id])
 		if err != nil {
 			t.Fatalf("StartNode(%d): %v", id, err)
@@ -156,7 +160,7 @@ func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var lastIndex uint64
 	wantValue := bytes.Repeat([]byte("z"), (1<<20)+123)
@@ -171,7 +175,17 @@ func TestOfflineFollowerRecoversThroughInstalledSnapshot(t *testing.T) {
 		}
 		lastIndex = result.LogIndex
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	// The leader snapshots every snapshotThreshold applied entries. An
+	// election during the writes adds a no-op and can leave lastIndex just
+	// past the last snapshot, where no later write would move it.
+	// fillerWrites writes to another key make the next snapshot cover
+	// lastIndex whatever the alignment.
+	for i := 1; i <= fillerWrites; i++ {
+		if _, err := client.Put(ctx, []byte("filler-key"), []byte(fmt.Sprintf("filler-%d", i))); err != nil {
+			t.Fatalf("filler Put(%d): %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		status, err := nodes[leaderID].Status(ctx)
 		if err == nil && status.SnapshotIndex >= lastIndex {

@@ -451,6 +451,21 @@ Not fixed. Each item is its own change, after the stack is merged.
   copy's while its p99 is a quarter of copy's. The cause is unknown and was
   not investigated. Candidates to check: batch-sized persists at the cap,
   and compaction volume (final commits about 3.7× the entries per window).
+- [x] **Three test flakes seen on GitHub runners, fixed at the tip**
+  (test-only commit on `phase-13-group-commit`). They showed on the stacked
+  PRs' intermediate commits:
+  - **`TestOfflineFollowerRecoversThroughInstalledSnapshot`:** depended on
+    snapshot alignment. An election during the writes adds a no-op, so the
+    last write can land just past a threshold snapshot, and the leader then
+    never compacts through it. Fixed with (threshold − 1) filler writes to
+    another key; the assertion is unchanged.
+  - **`TestCloseReturnsAfterRuntimeStoppedItself`:** a `Propose` racing a
+    runtime failure can find both its result and `done` ready, and `select`
+    picks between them at random. The test now accepts the injected error
+    or `raft.ErrStopped`. Any future test that races those two channels has
+    the same shape.
+  - **`TestMaxSizeValueCommitsAndReplicates`:** the 4 MiB Put's deadline was
+    raised from 20 s to 60 s; the assertions are unchanged.
 
 ## Verification Log
 

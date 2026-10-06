@@ -56,8 +56,11 @@ func TestCloseReturnsAfterRuntimeStoppedItself(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_, _, err = runtime.Propose(ctx, []byte("command"))
 		cancel()
-		if !errors.Is(err, errInjectedPersist) {
-			t.Fatalf("runtime %d: Propose error = %v, want the injected persist failure", i, err)
+		// The runtime hands the proposal the injected error and then closes
+		// done. A Propose that reaches its second select only after both
+		// may return either, so ErrStopped is also a correct answer here.
+		if !errors.Is(err, errInjectedPersist) && !errors.Is(err, raft.ErrStopped) {
+			t.Fatalf("runtime %d: Propose error = %v, want the injected persist failure or raft.ErrStopped", i, err)
 		}
 		closed := make(chan error, 1)
 		go func() { closed <- runtime.Close() }()

@@ -127,6 +127,9 @@ type Update struct {
 	Committed    []Entry
 	RoleChanged  bool
 	Snapshot     *Snapshot
+	// DroppedAppend says why a malformed append was dropped. It is empty
+	// otherwise; a dropped append has no other effect.
+	DroppedAppend string
 }
 
 func (u *Update) merge(other Update) {
@@ -144,6 +147,9 @@ func (u *Update) merge(other Update) {
 	if other.Snapshot != nil {
 		copy := cloneSnapshot(*other.Snapshot)
 		u.Snapshot = &copy
+	}
+	if other.DroppedAppend != "" {
+		u.DroppedAppend = other.DroppedAppend
 	}
 }
 
@@ -205,6 +211,9 @@ type Status struct {
 	VotedFor           uint64
 	MatchIndex         map[uint64]uint64
 	Membership         Membership
+	// MalformedAppendsDropped counts appends dropped since start because
+	// their entries could not have come from a correct leader.
+	MalformedAppendsDropped uint64
 }
 
 var (

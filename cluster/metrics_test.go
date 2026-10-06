@@ -245,3 +245,22 @@ func TestEngineCountersAreRegisteredAndGrow(t *testing.T) {
 		}
 	}
 }
+
+func TestObservedStoreCountsDroppedAppendsOncePerMessage(t *testing.T) {
+	metrics := newNodeMetrics(1)
+	const name = "lsmdb_raft_malformed_appends_dropped_total"
+	if value, ok := mustSnapshot(t, metrics)[name]; !ok || value != 0 {
+		t.Fatalf("%s before any drop = (%v, present=%v), want 0", name, value, ok)
+	}
+	store := &observedStore{inner: fakeStableStore{}, metrics: metrics}
+	for _, update := range []raft.Update{
+		{DroppedAppend: "entry 4: term 0"}, {}, {DroppedAppend: "entry 3: index gap"}, {Entries: entries(1)},
+	} {
+		if err := store.Persist(update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mustSnapshot(t, metrics)[name]; got != 2 {
+		t.Fatalf("%s = %v after 2 dropped appends, want 2", name, got)
+	}
+}

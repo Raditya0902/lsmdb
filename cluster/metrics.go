@@ -42,6 +42,7 @@ type nodeMetrics struct {
 	logSyncs          prometheus.Counter
 	logSyncEntries    prometheus.Counter
 	hardStateSyncs    prometheus.Counter
+	droppedAppends    prometheus.Counter
 	appendMessages    *prometheus.CounterVec
 	applySeconds      prometheus.Histogram
 	snapshotSeconds   prometheus.Histogram
@@ -71,6 +72,7 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		logSyncs:          prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_syncs_total", Help: "Raft log append syncs: successful persists carrying at least one entry.", ConstLabels: constant}),
 		logSyncEntries:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_sync_entries_total", Help: "Log entries written by Raft log append syncs.", ConstLabels: constant}),
 		hardStateSyncs:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_hardstate_syncs_total", Help: "Successful persists carrying a term or vote change.", ConstLabels: constant}),
+		droppedAppends:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_malformed_appends_dropped_total", Help: "Appends dropped because their entries could not have come from a correct leader.", ConstLabels: constant}),
 		appendMessages:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_append_messages_total", Help: "AppendEntries messages handed to the transport, by emitting code path.", ConstLabels: constant}, []string{"origin"}),
 		applySeconds:      prometheus.NewHistogram(prometheus.HistogramOpts{Name: "lsmdb_raft_apply_seconds", Help: "Time per committed-entry state-machine apply.", ConstLabels: constant, Buckets: prometheus.ExponentialBuckets(1e-6, 4, 12)}),
 		snapshotSeconds:   prometheus.NewHistogram(prometheus.HistogramOpts{Name: "lsmdb_raft_snapshot_seconds", Help: "Time per durable Raft snapshot persist (creation or install).", ConstLabels: constant, Buckets: prometheus.ExponentialBuckets(1e-3, 2, 16)}),
@@ -85,7 +87,7 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		m.role, m.term, m.leader, m.commit, m.applied, m.logLength, m.snapshotIndex, m.replicationLag,
 		m.elections, m.leadershipChanges, m.quorumLoss, m.proposals,
 		m.transportFailures, m.sendFailures, m.rpcRequests, m.rpcDuration,
-		m.logSyncs, m.logSyncEntries, m.hardStateSyncs, m.appendMessages, m.applySeconds, m.snapshotSeconds,
+		m.logSyncs, m.logSyncEntries, m.hardStateSyncs, m.droppedAppends, m.appendMessages, m.applySeconds, m.snapshotSeconds,
 	)
 	return m
 }
@@ -276,6 +278,9 @@ func (s *observedStore) count(update raft.Update) {
 	}
 	if update.HardState != nil {
 		s.metrics.hardStateSyncs.Inc()
+	}
+	if update.DroppedAppend != "" {
+		s.metrics.droppedAppends.Inc()
 	}
 }
 

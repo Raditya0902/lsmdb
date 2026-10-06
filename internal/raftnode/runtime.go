@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -382,6 +383,9 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 	}
 	if err != nil {
 		return fmt.Errorf("persist raft update: %w", err)
+	}
+	if update.DroppedAppend != "" {
+		log.Printf("raft: dropped malformed append %s", update.DroppedAppend)
 	}
 	if update.Snapshot != nil && r.machine.AppliedIndex() < update.Snapshot.Index {
 		reader, size, _, err := r.store.OpenSnapshot(update.Snapshot.Index)

@@ -30,6 +30,8 @@ type Node struct {
 	nextIndex    map[uint64]uint64
 	matchIndex   map[uint64]uint64
 	recentActive map[uint64]bool
+
+	malformedAppendsDropped uint64
 }
 
 // New constructs a node from durable hard state and log entries.
@@ -137,6 +139,15 @@ func (n *Node) Step(message Message) Update {
 	}
 	if !n.isCommunicationPeer(message.From) || message.From == n.cfg.ID {
 		return update
+	}
+	// A malformed append changes nothing, not even the term or the election
+	// timer, so a leader that only sends such messages is replaced.
+	if message.Type == MsgAppend {
+		if reason := malformedAppend(message); reason != "" {
+			n.malformedAppendsDropped++
+			update.DroppedAppend = fmt.Sprintf("from %d at term %d: %s", message.From, message.Term, reason)
+			return update
+		}
 	}
 
 	if message.Type != MsgPreVote && message.Type != MsgPreVoteResponse {
@@ -287,7 +298,8 @@ func (n *Node) Status() Status {
 		ID: n.cfg.ID, Role: n.role, Term: n.term, LeaderID: n.leaderID,
 		CommitIndex: n.commit, LastLogIndex: n.lastIndex(), VotedFor: n.votedFor,
 		SnapshotIndex: n.snapshot.Index, RetainedLogEntries: uint64(len(n.log)),
-		Membership: cloneMembership(n.membership),
+		Membership:              cloneMembership(n.membership),
+		MalformedAppendsDropped: n.malformedAppendsDropped,
 	}
 	if n.role == Leader {
 		status.MatchIndex = make(map[uint64]uint64, len(n.matchIndex))
@@ -493,15 +505,8 @@ func (n *Node) handleAppend(message Message) Update {
 	oldLen := len(n.log)
 	var truncatedTail []Entry
 	rebuild := false
+	// Step has already checked every entry with malformedAppend.
 	for i, entry := range message.Entries {
-		expected := message.LogIndex + uint64(i) + 1
-		if entry.Index != expected || entry.Term == 0 {
-			update.Messages = append(update.Messages, Message{
-				Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term,
-				Reject: true, RejectHint: message.LogIndex + 1,
-			})
-			return update
-		}
 		if entry.Index <= n.lastIndex() {
 			if n.termAt(entry.Index) == entry.Term {
 				continue
@@ -549,6 +554,34 @@ func (n *Node) handleAppend(message Message) Update {
 		LogIndex: lastNew, Context: message.Context,
 	})
 	return update
+}
+
+// malformedAppend returns why an append's entries cannot have come from a
+// correct leader, or "" if they are well formed. Entry i must have index
+// LogIndex+i+1, a term from LogTerm up to the message term that never
+// decreases, and at most MaxEntryBytes of data, as the stores require. It
+// reads only the message.
+func malformedAppend(message Message) string {
+	previous := message.LogTerm
+	for i, entry := range message.Entries {
+		want := message.LogIndex + uint64(i) + 1
+		switch {
+		case entry.Index != want:
+			return fmt.Sprintf("entry %d has index %d, want %d", i, entry.Index, want)
+		case entry.Term == 0:
+			return fmt.Sprintf("entry %d (index %d) has term 0", i, entry.Index)
+		case len(entry.Data) > MaxEntryBytes:
+			return fmt.Sprintf("entry %d (index %d) has %d bytes, over %d", i, entry.Index, len(entry.Data), MaxEntryBytes)
+		case entry.Term > message.Term:
+			return fmt.Sprintf("entry %d (index %d) has term %d, above the message term %d", i, entry.Index, entry.Term, message.Term)
+		case i == 0 && entry.Term < previous:
+			return fmt.Sprintf("entry 0 (index %d) has term %d, below LogTerm %d", entry.Index, entry.Term, previous)
+		case entry.Term < previous:
+			return fmt.Sprintf("entry %d (index %d) has term %d, below the previous entry's %d", i, entry.Index, entry.Term, previous)
+		}
+		previous = entry.Term
+	}
+	return ""
 }
 
 func (n *Node) handleSnapshot(message Message) Update {

@@ -259,13 +259,23 @@ func (r *Runtime) LinearizableRead(ctx context.Context) (uint64, error) {
 }
 
 // Close stops the runtime after closing the state machine and stable store.
+// It returns nil if the runtime had already stopped itself.
 func (r *Runtime) Close() error {
 	var err error
 	r.once.Do(func() {
 		result := make(chan error, 1)
 		select {
 		case r.events <- stopEvent{result: result}:
-			err = <-result
+			// The event queue can accept the stop event after the loop has
+			// already stopped itself, and then nothing answers it.
+			select {
+			case err = <-result:
+			case <-r.done:
+				select {
+				case err = <-result:
+				default:
+				}
+			}
 		case <-r.done:
 			err = nil
 		}

@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	lsmdbv1 "lsmdb/api/lsmdb/v1"
+	"lsmdb/db"
+	"lsmdb/internal/kvstate"
 	"lsmdb/internal/raft"
 
 	"google.golang.org/grpc/codes"
@@ -204,6 +207,41 @@ func TestSendFailureClassesAreRegisteredAtZero(t *testing.T) {
 		name := "lsmdb_raft_transport_send_failures_total{class=" + class + "}"
 		if value, ok := got[name]; !ok || value != 0 {
 			t.Errorf("%s = (%v, present=%v), want 0 before any failure", name, value, ok)
+		}
+	}
+}
+
+func TestEngineCountersAreRegisteredAndGrow(t *testing.T) {
+	machine, err := kvstate.Open(t.TempDir(), &db.Options{FlushThreshold: 2, CompactionThreshold: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer machine.Close()
+	metrics := newNodeMetrics(1)
+	metrics.registerEngineStats(machine.EngineStats)
+	names := []string{
+		"lsmdb_engine_flushes_total", "lsmdb_engine_flush_seconds_total",
+		"lsmdb_engine_compactions_total", "lsmdb_engine_compaction_seconds_total",
+	}
+	before := mustSnapshot(t, metrics)
+	for _, name := range names {
+		if value, ok := before[name]; !ok || value != 0 {
+			t.Errorf("%s before any apply = (%v, present=%v), want 0", name, value, ok)
+		}
+	}
+	for index := uint64(1); index <= 8; index++ {
+		data, err := kvstate.EncodeCommand(lsmdbv1.Command_OPERATION_PUT, []byte(fmt.Sprintf("key-%d", index)), []byte("v"), "client", index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := machine.Apply(index, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := mustSnapshot(t, metrics)
+	for _, name := range names {
+		if after[name] <= before[name] {
+			t.Errorf("%s = %v after 8 applies, want above %v", name, after[name], before[name])
 		}
 	}
 }

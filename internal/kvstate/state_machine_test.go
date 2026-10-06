@@ -107,3 +107,22 @@ func TestMachineSnapshotRestorePreservesDataAndDeduplication(t *testing.T) {
 		t.Fatalf("applied index = %d", target.AppliedIndex())
 	}
 }
+
+func TestMachineEngineStatsCountFlushCausedByApply(t *testing.T) {
+	machine, err := Open(t.TempDir(), &db.Options{FlushThreshold: 2, CompactionThreshold: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer machine.Close()
+	if stats := machine.EngineStats(); stats.Flushes != 0 {
+		t.Fatalf("flushes before any Apply = %d, want 0", stats.Flushes)
+	}
+	for index := uint64(1); index <= 4; index++ {
+		if err := machine.Apply(index, command(t, lsmdbv1.Command_OPERATION_PUT, "value", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stats := machine.EngineStats(); stats.Flushes == 0 || stats.FlushTime <= 0 {
+		t.Fatalf("EngineStats after 4 applies at FlushThreshold 2 = %+v, want a timed flush", stats)
+	}
+}

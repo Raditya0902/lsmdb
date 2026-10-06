@@ -62,3 +62,28 @@ func TestCounterDeltasCountSendFailuresInWindowOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestCounterDeltasIncludeEngineFlushesAndCompactions(t *testing.T) {
+	before := []map[string]float64{
+		{"lsmdb_engine_flushes_total": 3, "lsmdb_engine_flush_seconds_total": 0.5, "lsmdb_engine_compactions_total": 1, "lsmdb_engine_compaction_seconds_total": 2},
+		{"lsmdb_engine_flushes_total": 0, "lsmdb_engine_flush_seconds_total": 0, "lsmdb_engine_compactions_total": 0, "lsmdb_engine_compaction_seconds_total": 0},
+	}
+	after := []map[string]float64{
+		{"lsmdb_engine_flushes_total": 5, "lsmdb_engine_flush_seconds_total": 0.75, "lsmdb_engine_compactions_total": 2, "lsmdb_engine_compaction_seconds_total": 3.5},
+		{"lsmdb_engine_flushes_total": 4, "lsmdb_engine_flush_seconds_total": 1, "lsmdb_engine_compactions_total": 1, "lsmdb_engine_compaction_seconds_total": 0.5},
+	}
+	got := counterDeltas(before, after, 100)
+	if got.Flushes != 6 || got.FlushSeconds != 1.25 || got.Compactions != 2 || got.CompactionSeconds != 2 {
+		t.Fatalf("engine deltas = %v flushes in %v s, %v compactions in %v s; want 6, 1.25, 2, 2",
+			got.Flushes, got.FlushSeconds, got.Compactions, got.CompactionSeconds)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"flushes":6`, `"flush_seconds":1.25`, `"compactions":2`, `"compaction_seconds":2`} {
+		if !strings.Contains(string(data), field) {
+			t.Errorf("counters JSON lacks %s: %s", field, data)
+		}
+	}
+}

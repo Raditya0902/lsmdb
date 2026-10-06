@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"lsmdb/internal/compact"
 	"lsmdb/internal/manifest"
@@ -52,6 +54,13 @@ type DB struct {
 	appliedIndex uint64
 	durableIndex uint64
 	closed       bool
+
+	// Counted after each flush or compaction is published; read by Stats
+	// without db.mu.
+	flushes         atomic.Uint64
+	flushNanos      atomic.Int64
+	compactions     atomic.Uint64
+	compactionNanos atomic.Int64
 }
 
 // Open creates or opens a database at path.
@@ -585,6 +594,7 @@ func (db *DB) flush() error {
 	if db.path == "" {
 		return nil
 	}
+	start := time.Now()
 
 	db.nextSST++
 	sstName := fmt.Sprintf("%06d.sst", db.nextSST)
@@ -635,6 +645,9 @@ func (db *DB) flush() error {
 			return fmt.Errorf("rotate wal: %w", err)
 		}
 	}
+	// Counted before the nested compaction, so flush time excludes it.
+	db.flushes.Add(1)
+	db.flushNanos.Add(int64(time.Since(start)))
 
 	return db.maybeCompact()
 }
@@ -656,6 +669,7 @@ func (db *DB) compact() error {
 	if len(db.readers) == 0 {
 		return nil
 	}
+	start := time.Now()
 
 	db.nextSST++
 	outPath := filepath.Join(db.path, fmt.Sprintf("%06d.sst", db.nextSST))
@@ -713,6 +727,8 @@ func (db *DB) compact() error {
 
 	db.readers = newReaders
 	db.manifest = state
+	db.compactions.Add(1)
+	db.compactionNanos.Add(int64(time.Since(start)))
 
 	log.Printf("[compact] %d files, %d records in → %d records out (%s)",
 		filesIn, recordsIn, recordsOut, filepath.Base(outPath))

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"lsmdb/db"
 	"lsmdb/internal/raft"
 	"lsmdb/internal/raftnode"
 
@@ -20,6 +21,7 @@ import (
 )
 
 type nodeMetrics struct {
+	labels            prometheus.Labels
 	registry          *prometheus.Registry
 	role              *prometheus.GaugeVec
 	term              prometheus.Gauge
@@ -48,6 +50,7 @@ type nodeMetrics struct {
 func newNodeMetrics(nodeID uint64) *nodeMetrics {
 	constant := prometheus.Labels{"node_id": strconv.FormatUint(nodeID, 10)}
 	m := &nodeMetrics{
+		labels:            constant,
 		registry:          prometheus.NewRegistry(),
 		role:              prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "lsmdb_raft_role", Help: "One-hot Raft role.", ConstLabels: constant}, []string{"role"}),
 		term:              prometheus.NewGauge(prometheus.GaugeOpts{Name: "lsmdb_raft_term", Help: "Current Raft term.", ConstLabels: constant}),
@@ -85,6 +88,25 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		m.logSyncs, m.logSyncEntries, m.hardStateSyncs, m.appendMessages, m.applySeconds, m.snapshotSeconds,
 	)
 	return m
+}
+
+// registerEngineStats exposes the state machine's flush and compaction counts
+// and times, read from stats at each scrape.
+func (m *nodeMetrics) registerEngineStats(stats func() db.Stats) {
+	counter := func(name, help string, value func(db.Stats) float64) prometheus.Collector {
+		return prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help, ConstLabels: m.labels},
+			func() float64 { return value(stats()) })
+	}
+	m.registry.MustRegister(
+		counter("lsmdb_engine_flushes_total", "Engine memtable flushes published.",
+			func(s db.Stats) float64 { return float64(s.Flushes) }),
+		counter("lsmdb_engine_flush_seconds_total", "Time in engine flushes, excluding the compactions they trigger.",
+			func(s db.Stats) float64 { return s.FlushTime.Seconds() }),
+		counter("lsmdb_engine_compactions_total", "Engine compactions published.",
+			func(s db.Stats) float64 { return float64(s.Compactions) }),
+		counter("lsmdb_engine_compaction_seconds_total", "Time in engine compactions.",
+			func(s db.Stats) float64 { return s.CompactionTime.Seconds() }),
+	)
 }
 
 // snapshot flattens the registry into name{label=value,...} keys, omitting the

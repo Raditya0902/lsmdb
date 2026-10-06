@@ -178,6 +178,7 @@ func StartNode(config NodeConfig) (*Node, error) {
 	}
 	transport := raftgrpc.NewWithResolver(resolver)
 	metrics := newNodeMetrics(config.ID)
+	metrics.registerEngineStats(machine.EngineStats)
 	observed := &observedTransport{inner: transport, metrics: metrics}
 	runtime, err := raftnode.Start(
 		raftnode.Config{TickInterval: config.TickInterval, SnapshotThreshold: config.SnapshotThreshold}, core,

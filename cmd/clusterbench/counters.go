@@ -27,6 +27,12 @@ type Counters struct {
 	// SendFailuresOther counts every other failed send.
 	SendFailuresDeadline float64 `json:"send_failures_deadline"`
 	SendFailuresOther    float64 `json:"send_failures_other"`
+	// Engine flushes and compactions in the window. Flush time excludes the
+	// compactions flushes trigger; apply time includes both.
+	Flushes           float64 `json:"flushes"`
+	FlushSeconds      float64 `json:"flush_seconds"`
+	Compactions       float64 `json:"compactions"`
+	CompactionSeconds float64 `json:"compaction_seconds"`
 }
 
 // counterDeltas subtracts per-node registry snapshots taken at window start
@@ -49,6 +55,10 @@ func counterDeltas(before, after []map[string]float64, committed uint64) Counter
 		AppendMessages: map[string]float64{}, AppendPerCommittedEntryByOrigin: map[string]float64{},
 		SendFailuresDeadline: delta(sendFailureMetricPrefix + "deadline}"),
 		SendFailuresOther:    delta(sendFailureMetricPrefix + "other}"),
+		Flushes:              delta("lsmdb_engine_flushes_total"),
+		FlushSeconds:         delta("lsmdb_engine_flush_seconds_total"),
+		Compactions:          delta("lsmdb_engine_compactions_total"),
+		CompactionSeconds:    delta("lsmdb_engine_compaction_seconds_total"),
 	}
 	origins := map[string]bool{}
 	for _, values := range after {

@@ -341,6 +341,15 @@ opposite sides of the fix.
 Both are counted over the measurement window and summed over the three nodes. The
 summary prints their medians per run, or `-` for reports that predate them.
 
+**Engine flushes and compactions.** Reports from phase-12b hardening item 2 onward
+record `flushes`, `flush_seconds`, `compactions` and `compaction_seconds` in the
+JSON. They are counted over the measurement window and summed over the three nodes.
+- Flush time excludes the compaction a flush triggers.
+- Apply time (`apply_seconds`) includes both, because flushes and compactions run
+  inside the Raft apply.
+
+The summary does not print these fields.
+
 **Checking a result file.** Before quoting any number, run the checker on the
 compare file (or on a single clusterbench report, with at most one `-expect`):
 

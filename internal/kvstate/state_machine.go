@@ -131,3 +131,6 @@ func (m *Machine) Restore(index uint64, data []byte) error {
 func (m *Machine) AppliedIndex() uint64 { return m.db.AppliedIndex() }
 func (m *Machine) DurableIndex() uint64 { return m.db.DurableIndex() }
 func (m *Machine) Close() error         { return m.db.Close() }
+
+// EngineStats returns the underlying DB's flush and compaction counts.
+func (m *Machine) EngineStats() db.Stats { return m.db.Stats() }

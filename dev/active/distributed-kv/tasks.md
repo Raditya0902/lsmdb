@@ -4,21 +4,18 @@ Last updated: 2026-10-06
 
 ## Current Phase
 
-Phase 12b hardening (six small fixes, D020) is in progress on branch
-`phase-12b-hardening`, created from the phase-12b evidence commit `ca35b90`.
+Phase 13 (Raft group commit, D022) is built and waiting for its VM run, on
+branch `phase-13-group-commit`, created from `d0e7c26`
+(`dev/active/phase-13-group-commit/`). The final arm is `a76f182`. The
+pre-registered VM comparison (thresholds P1–P7) has not run; D022 is not yet
+measured.
 
 Phases 11, 10, 12a and 12b are complete on stacked branches:
 `phase-11-correctness-fixes`, then `phase-10-benchmark-harness-v2`, then
-`phase-12a-dup-ack-fix`, then `phase-12b-append-size-and-log-copy`. None is
-merged into `main` (`bd67696`) yet.
-
-Phase details are in `dev/active/phase-12b-hardening/`. The vote lease (D021)
-is done on branch `phase-12b-vote-lease`, created from `658cfa0`
-(`dev/active/phase-12b-vote-lease/`).
-
-Phase 13 (Raft group commit, D022 accepted) is in progress on branch
-`phase-13-group-commit`, created from `d0e7c26`
-(`dev/active/phase-13-group-commit/`).
+`phase-12a-dup-ack-fix`, then `phase-12b-append-size-and-log-copy`. Phase 12b
+hardening (D020, `phase-12b-hardening`) and the vote lease (D021,
+`phase-12b-vote-lease`) are done, except hardening item 3, which is optional
+and not started. None is merged into `main` (`bd67696`) yet.
 
 ## Completed
 
@@ -80,8 +77,9 @@ Phase 13 (Raft group commit, D022 accepted) is in progress on branch
 
 ## In Progress
 
-- Phase 12b hardening: Step 1 approved 2026-10-05. Commits in the order 0, 1, 2,
-  5, 4, 6, 3; item 3 is gated on an old-binary check (D020).
+- Phase 13: (a) to (f) are built. Waiting for the pre-registered VM
+  comparison (four arms, 60 runs) and the large-value stage; then results
+  and docs.
 
 ## Phase 1 — Crash-Safe LSM Seam
 

@@ -194,7 +194,7 @@ func (c *Client) client(address string) (lsmdbv1.KVClient, error) {
 	connection, err := grpc.NewClient(
 		address, grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(kvstateMessageLimit), grpc.MaxCallSendMsgSize(kvstateMessageLimit),
+			grpc.MaxCallRecvMsgSize(serverMessageLimit), grpc.MaxCallSendMsgSize(serverMessageLimit),
 		),
 	)
 	if err != nil {
@@ -205,8 +205,6 @@ func (c *Client) client(address string) (lsmdbv1.KVClient, error) {
 	c.clients[address] = client
 	return client, nil
 }
-
-const kvstateMessageLimit = (4 << 20) + (64 << 10)
 
 func (c *Client) orderedAddresses() []string {
 	c.mu.Lock()

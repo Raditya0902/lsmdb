@@ -247,6 +247,15 @@ func TestMaxSizeValueCommitsAndReplicates(t *testing.T) {
 			t.Fatalf("node %d holds found=%v len=%d err=%v, want the 4 MiB value", id, found, len(stored), err)
 		}
 	}
+	// The Put exercised the client's send limit; the Get exercises its
+	// receive limit.
+	got, err := client.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get of the 4 MiB value: %v", err)
+	}
+	if !got.Found || !bytes.Equal(got.Value, value) {
+		t.Fatalf("Get = found %v, %d bytes; want the 4 MiB value", got.Found, len(got.Value))
+	}
 }
 
 func TestOversizedPutIsRejectedAndLeaderKeepsServing(t *testing.T) {

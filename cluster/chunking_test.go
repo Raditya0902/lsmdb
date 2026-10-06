@@ -64,11 +64,53 @@ func memoryStatuses(t *testing.T, replicas map[uint64]*memoryReplica) map[uint64
 	return statuses
 }
 
+// waitForAgreedMemoryLeader returns the leader once it has committed an entry
+// of its own term and every replica reports it as leader in that term, so no
+// replica is still waiting to hear from a leader when the writes start.
+func waitForAgreedMemoryLeader(t *testing.T, replicas map[uint64]*memoryReplica) *memoryReplica {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if leader := agreedMemoryLeader(replicas); leader != nil {
+			return leader
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("replicas did not agree on a leader")
+	return nil
+}
+
+// agreedMemoryLeader returns the leader if every replica answered and reports
+// the leader's ID and term, and nil otherwise.
+func agreedMemoryLeader(replicas map[uint64]*memoryReplica) *memoryReplica {
+	statuses := make(map[uint64]raft.Status, len(replicas))
+	var leader raft.Status
+	for id, replica := range replicas {
+		status, err := replica.runtime.Status(context.Background())
+		if err != nil {
+			return nil
+		}
+		statuses[id] = status
+		if status.Role == raft.Leader && status.CommitIndex > 0 {
+			leader = status
+		}
+	}
+	if leader.ID == 0 {
+		return nil
+	}
+	for _, status := range statuses {
+		if status.Term != leader.Term || status.LeaderID != leader.ID {
+			return nil
+		}
+	}
+	return replicas[leader.ID]
+}
+
 func TestMemoryClusterShipsLargeEntriesInCappedChunks(t *testing.T) {
 	const proposers, writes, valueSize = 4, 12, 400 << 10
 	recorder := &appendSizeRecorder{}
 	replicas := startMemoryCluster(t, recorder.wrap)
-	leader := waitForMemoryLeader(t, replicas)
+	leader := waitForAgreedMemoryLeader(t, replicas)
 	before := memoryStatuses(t, replicas)
 	value := bytes.Repeat([]byte{'v'}, valueSize)
 	if err := proposeData(leader, proposers, writes, func(int) []byte { return value }); err != nil {

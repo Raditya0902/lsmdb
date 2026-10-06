@@ -236,3 +236,15 @@ func TestDefaultAppendCapIsOneMiB(t *testing.T) {
 		t.Fatalf("heartbeat to 2 carries %v entries, want 8 (1 MiB accounted)", entrySizes(heartbeat))
 	}
 }
+
+func TestSmallPendingEntriesShipInOneAppend(t *testing.T) {
+	// The cap must bound large messages without splitting small batches: 20
+	// pending 128-byte entries (3,200 accounted bytes) fit one append.
+	nodes := newTestCluster(t)
+	leader := electNodeOne(t, nodes)
+	proposeWhileCutOff(t, nodes, leader, repeatSize(128, 20)...)
+	heartbeat := appendsTo(leader.Tick(), 2)
+	if len(heartbeat) != 1 || len(heartbeat[0].Entries) != 20 {
+		t.Fatalf("heartbeat to 2 = %d messages carrying %v entries, want one append with all 20", len(heartbeat), entrySizes(heartbeat))
+	}
+}

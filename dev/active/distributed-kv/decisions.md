@@ -308,6 +308,27 @@ Consequences:
   re-shipped everything.
 - **Entry size:** a Put whose encoded command exceeds `MaxEntryBytes` now fails
   with `InvalidArgument` instead of stopping the leader.
+- **Size margins:** a test pins them on a real `RaftMessage`.
+  - The largest command the API accepts (16 KiB key, 4 MiB value, 64-byte client
+    ID) encodes to 4,210,776 bytes, 16,296 under `MaxEntryBytes`.
+  - Alone in an append, with every id, term, index and ReadIndex context at its
+    widest varint, it serializes to 4,210,887 bytes, 48,953 under the gRPC limit.
+- **Raising the store limit is not downgrade-safe.**
+  - Recovery treats a record whose length exceeds the limit like a torn tail.
+    `readLog` stops at that record (`raftstore/store.go:276-277`), and `Open`
+    truncates `raft.log` at its start (`:66`). That record and every later one
+    are discarded, whether committed or not.
+  - So a binary from before this change (4 MiB limit) that opens a log holding
+    an entry between 4 MiB and 4 MiB + 32 KiB rewrites the log without it. It
+    happens on disk, before the Raft core starts, and upgrading again does not
+    restore it.
+  - If the state machine's applied index is past the cut, `raft.New` refuses to
+    start ("applied index … outside snapshot/log range"), but the file is already
+    truncated.
+  - If not, the node starts without the discarded suffix and needs a leader that
+    still holds it. If a majority is downgraded, committed entries are lost.
+  - Do not run an older binary on data written by this one. The same rule
+    applies to any later change to the limit.
 - **Phase 12c:** entry-free heartbeats, an inflight window and reject echo of
   `LogIndex` stay in 12c. Each must keep a catch-up path that satisfies the bound
   above.

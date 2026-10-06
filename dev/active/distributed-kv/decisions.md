@@ -224,6 +224,92 @@ Consequences:
 - **The `ack_resend` counter changes meaning.** It no longer counts duplicate-ack
   resends; it counts rejection probes and follow-ups after advancing acks.
 
+### D019 — AppendEntries carry at most about 1 MiB, and followers copy and rescan their log only when it changes shape
+
+Context:
+
+- **A3, uncapped appends.** `appendMessage` shipped every entry from `nextIndex`
+  to the last index in one message (`internal/raft/node.go:686-701` at `6d6dda7`).
+  - With two or more large entries pending, every append to that follower,
+    heartbeats included, exceeded the gRPC receive limit of 4 MiB + 64 KiB
+    (`cluster/node.go:199-200`). Elections followed.
+  - The analysis report measured 24 writes × 2.5 MiB at 4 clients: 12 elections.
+  - This is report rank 4, finding A3.
+- **4 MiB values never committed.** The Raft store rejects entries whose `Data`
+  exceeds 4 MiB (`internal/raftstore/store.go:24`). A command with a 4 MiB value
+  is larger than that, and the failed persist stops the leader's runtime. So the
+  4 MiB values promised in the README could not commit.
+- **The follower copied its whole log on every append.** Every accepted append
+  deep-copied the retained log (`node.go:487-490`) and rescanned it for membership
+  (`:517`).
+  - This included entry-less heartbeats, so the cost grew with run length.
+  - The copy is only the undo buffer for a failed membership rebuild. Membership
+    rollback on truncation comes from the rebuild itself.
+  - The phase-12a sweeps showed the effect. With the log unbounded, 1-client
+    throughput fell from 183 to 120 ops/s between 10 s and 60 s. With the log
+    bounded, it held at 193–209.
+
+Decision:
+
+1. **Byte cap.** `appendMessage` takes entries from `nextIndex` while the
+   accounted size stays at or under `Config.MaxAppendBytes` (default 1 MiB), and
+   always takes at least one entry.
+   - An entry counts as `len(Data) + 32`, a bound on its protobuf framing.
+   - The message envelope (at most 121 bytes) is not counted.
+2. **One entry-size limit.** `raft.MaxEntryBytes` is 4 MiB + 32 KiB.
+   - `Propose` rejects larger data with `ErrEntryTooLarge`, which the cluster maps
+     to `InvalidArgument`.
+   - The store uses the same limit.
+   - The largest single-entry message, `MaxEntryBytes + 32 + 121` bytes, stays
+     under the gRPC limit. A test pins that relation.
+3. **Heartbeats carry a capped chunk.** They are not entry-less. They still ship
+   from `nextIndex`, so D018's recovery path is preserved. A caught-up follower's
+   heartbeat is still entry-less.
+4. **`nextIndex` floor.** A rejection never lowers `nextIndex` below
+   `matchIndex + 1`. Within a term, everything at or below `matchIndex` matches the
+   leader's log, so such a rejection is stale.
+5. **Follower append cost.** `handleAppend` no longer copies the log up front.
+   - It keeps the old length, and a shallow copy of the tail only when a conflict
+     truncates.
+   - It rebuilds membership only if it truncated, or if an appended entry carries
+     the membership prefix.
+   - A failed rebuild restores the log and rejects, as before.
+
+Consequences:
+
+- **Catch-up now takes one chunk per round (this updates D018's bound).**
+  - Let C be the number of capped chunks a follower lacks, R the number of
+    rejection rounds needed to find its match point, and k the number of heartbeat
+    rounds lost to it.
+  - With follow-ups lost and only heartbeats delivering, the follower catches up
+    within **(R + C + k) × HeartbeatTicks** ticks, plus one delivery and one
+    persist of at most one chunk per round.
+  - D018's (k + 1) × HeartbeatTicks is the case R = 0, C = 1.
+  - With follow-ups delivered, the C chunks chain back to back with no heartbeat
+    wait.
+  - The floor (decision 4) is what makes every delivered round progress. Without
+    it, a stale rejection could leave the follower re-acking a chunk it already
+    holds, forever.
+- **Termination is unchanged.** Each follow-up still needs a strict increase in
+  `matchIndex`. Follow-ups per term are bounded by chunks, not entries.
+- **The phase-11 commit rule is now load-bearing.** Capped messages routinely
+  carry `LeaderCommit` beyond their last entry, so a follower commits at most
+  `min(LeaderCommit, lastNew)`. Phase 11 (`f2fb1e6`) implements this, and a test
+  guards it.
+- **ReadIndex:**
+  - Probes carry a capped chunk, which bounds the follower's persist time before
+    it answers.
+  - Acks still count by context and term, not by entries.
+  - A rejected probe still drops its context (unchanged).
+- **Duplicates in flight:** while a large chunk is unacked, heartbeats re-ship it.
+  This is accepted until phase 12c adds inflight tracking. Uncapped heartbeats
+  re-shipped everything.
+- **Entry size:** a Put whose encoded command exceeds `MaxEntryBytes` now fails
+  with `InvalidArgument` instead of stopping the leader.
+- **Phase 12c:** entry-free heartbeats, an inflight window and reject echo of
+  `LogIndex` stay in 12c. Each must keep a catch-up path that satisfies the bound
+  above.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

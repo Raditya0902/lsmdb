@@ -4,10 +4,15 @@ Last updated: 2026-10-05
 
 ## Current Phase
 
-Phase 11 (correctness fixes A1, A2, A4, A5 from
-`dev/active/analysis-report.md`) is complete on branch `phase-11-correctness-fixes`
-and awaiting review. Phase 10 (benchmark harness v2) is next. Phase details:
-`dev/active/phase-11-correctness-fixes/`.
+Phase 12b (AppendEntries size cap and follower log copy, D019) is in design on
+branch `phase-12b-append-size-and-log-copy`, created from the phase-12a tip
+`6d6dda7`.
+
+Phases 11, 10 and 12a are complete on stacked branches:
+`phase-11-correctness-fixes`, then `phase-10-benchmark-harness-v2`, then
+`phase-12a-dup-ack-fix`. None is merged into `main` (`bd67696`) yet.
+
+Phase details are in `dev/active/phase-12b-append-size-and-log-copy/`.
 
 ## Completed
 
@@ -69,8 +74,9 @@ and awaiting review. Phase 10 (benchmark harness v2) is next. Phase details:
 
 ## In Progress
 
-- Phase 12a: duplicate-ack resend fix (D018), branch `phase-12a-dup-ack-fix` from
-  the phase-10 tip `8f07b48`.
+- Phase 12b: Step 1 (docs and D019) approved 2026-10-05. The store limit is
+  raised to 4 MiB + 32 KiB, and test 5 runs over localhost gRPC. Item 1 and item 2
+  fixes in progress.
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -141,11 +147,33 @@ and awaiting review. Phase 10 (benchmark harness v2) is next. Phase details:
   by clusterbench through the `cluster` transport wrapper. The bench_compare
   summary leads with total AppendEntries per committed entry (`ed9359d`).
 - [x] D018 written; RUNBOOK notes that `ack_resend` changes meaning at the fix.
-- [ ] Leader sends a follow-up append only after an ack that advances `matchIndex`;
+- [x] Leader sends a follow-up append only after an ack that advances `matchIndex`;
   tests for duplicate acks, rejection probes, heartbeat catch-up, ReadIndex,
-  check-quorum, and a bound on AppendEntries per committed entry.
-- [ ] Official Linux comparison and fix-arm duration sweep, judged against the
-  thresholds pre-registered in `dev/active/phase-12a-dup-ack-fix/plan.md`.
+  check-quorum, and a bound on AppendEntries per committed entry (`56267a1`).
+- [x] bench_compare passes machine and disk labels to arms whose clusterbench
+  accepts them (`27ba9ce`).
+- [x] Official Linux comparison and fix-arm duration sweep, judged against the
+  thresholds pre-registered in `dev/active/phase-12a-dup-ack-fix/plan.md`. Results
+  committed in `6d6dda7` (`benchmarks/results/2026-10-05-*`).
+  - **Comparison:** the fix is meaningful at every client count. Appends/entry
+    fell from 64–200 to 5.1–6.7, ops/s went from 21–38 to 137–151, and p99 at
+    4 clients from 672 to 45.7 ms.
+  - **Misses:** 8 of 10 thresholds pass. The duration-growth miss is explained by
+    the retained log (flat with snapshots every 1000 entries). The 16-vs-1-client
+    throughput miss is unexplained and deferred.
+
+## Phase 12b — AppendEntries Size Cap and Follower Log Copy
+
+Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
+
+- [ ] Item 1: byte-capped AppendEntries (about 1 MiB, at least one entry), one
+  entry-size limit across proposal, store and transport, and a `nextIndex` floor
+  on rejection. Tests include the report A3 repro and a 4 MiB value.
+- [ ] Item 2: follower copies and rescans its log only on truncation or a
+  configuration entry.
+- [ ] Official three-arm VM comparison (base, cap, copy), copy-arm duration sweep
+  and the large-value run, judged against the thresholds pre-registered in the
+  phase plan.
 
 ## Verification Log
 
@@ -238,7 +266,12 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Phase 12a: the duplicate-ack resend fix (`dev/active/phase-12a-dup-ack-fix/`), then
-its official VM comparison. The phase-10 harness and baseline are done on branch
-`phase-10-benchmark-harness-v2`, which is not yet merged.
+Phase 12b, after approval:
+- commit (a), docs;
+- (b), the item 1 fix;
+- (c), the item 2 fix;
+- then the three-arm VM comparison in the phase plan.
+
+The phase-11, phase-10 and phase-12a branches are to be pushed as a stack and
+merged with merge commits, in that order.
 Optional stale follower reads remain deferred.

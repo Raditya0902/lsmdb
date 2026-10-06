@@ -627,9 +627,9 @@ Range scans (H) favour SQLite by 2.7× (6k vs 2.2k ops/sec). The LSM path must c
 
 ### Embedded benchmark methodology
 
-- **SQLite pragmas:** `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL`. Both engines accept a narrow crash window (LSM only fsyncs on SSTable flush; SQLite only fsyncs on WAL checkpoint).
+- **SQLite pragmas:** `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL`. Both engines accept a crash window, and they are not equivalent: the LSM engine fsyncs only on SSTable flush and SQLite only at WAL checkpoints, so after a power failure each can lose a different set of recent writes.
 - **SQLite write batching:** Pre-population steps use batched transactions of 100 writes. Timed write workloads (A, B, C, E) use per-operation transactions to match LSM's per-write granularity.
-- **Reproducibility:** All key and value sequences use fixed seeds. Running `go run ./cmd/bench/...` produces the same workload on any machine.
+- **Reproducibility:** All key and value sequences use fixed seeds. The current `cmd/bench` keeps the same workload definitions and seeds, so `go run ./cmd/bench` runs the same workloads. It reports wall-clock ops/s and nearest-rank percentiles, so its numbers are not comparable to this table.
 - **Operation counts:** A/B = 10,000 writes; C = 5,000 pairs; D = 5,000 lookups after 5,000 writes; E = 10 keys × 1,000 updates; F = 5,000 writes + 2,500 deletes + 5,000 reads.
 - **Hardware:** GCP e2-standard-2 (2 vCPU, 8 GB RAM, x86_64), Debian Linux 6.1. Results will differ on different hardware and under concurrent load.
 
@@ -646,8 +646,9 @@ Range scans (H) favour SQLite by 2.7× (6k vs 2.2k ops/sec). The LSM path must c
   - committed entries are applied one index at a time;
   - snapshots, flushes and compactions run inside the event loop.
 
-  The measured gain is for one VM and disk (see [Results](#results)), and the
-  tail above p99 at 16 clients is unexplained.
+  The measured gain is for one machine type, and the phase-13 comparison ran on
+  a single VM instance and disk (see [Results](#results)). The tail above p99 at
+  16 clients is unexplained.
 - **No compression.** Keys and values are written verbatim. There is no snappy/zstd layer.
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.

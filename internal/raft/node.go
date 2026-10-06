@@ -276,17 +276,40 @@ func (n *Node) Propose(data []byte) (uint64, Update, error) {
 	if len(data) > MaxEntryBytes {
 		return 0, Update{}, ErrEntryTooLarge
 	}
-	if n.role != Leader {
-		return 0, Update{}, ErrNotLeader
+	indexes, update, err := n.ProposeBatch([][]byte{data})
+	if err != nil {
+		return 0, Update{}, err
 	}
-	entry := Entry{Index: n.lastIndex() + 1, Term: n.term, Data: append([]byte(nil), data...)}
-	n.log = append(n.log, entry)
-	n.matchIndex[n.cfg.ID] = entry.Index
-	n.nextIndex[n.cfg.ID] = entry.Index + 1
-	update := Update{Entries: []Entry{cloneEntry(entry)}}
+	return indexes[0], update, nil
+}
+
+// ProposeBatch appends commands on the leader in input order and starts
+// replication once, so the whole batch is persisted by one Update (D022).
+// indexes[i] is command i's log index, or 0 if it exceeds MaxEntryBytes; the
+// other commands are appended anyway. Unless this node is leader it returns
+// ErrNotLeader and appends nothing.
+func (n *Node) ProposeBatch(data [][]byte) (indexes []uint64, update Update, err error) {
+	if n.role != Leader {
+		return nil, Update{}, ErrNotLeader
+	}
+	indexes = make([]uint64, len(data))
+	for i, command := range data {
+		if len(command) > MaxEntryBytes {
+			continue
+		}
+		entry := Entry{Index: n.lastIndex() + 1, Term: n.term, Data: append([]byte(nil), command...)}
+		n.log = append(n.log, entry)
+		update.Entries = append(update.Entries, cloneEntry(entry))
+		indexes[i] = entry.Index
+	}
+	if len(update.Entries) == 0 {
+		return indexes, Update{}, nil
+	}
+	n.matchIndex[n.cfg.ID] = n.lastIndex()
+	n.nextIndex[n.cfg.ID] = n.lastIndex() + 1
 	update.Messages = append(update.Messages, n.broadcastAppend(OriginProposal)...)
 	update.merge(n.maybeCommit())
-	return entry.Index, update, nil
+	return indexes, update, nil
 }
 
 // ReadProbe emits a contextual heartbeat used to confirm current leadership.

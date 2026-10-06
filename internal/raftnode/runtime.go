@@ -46,6 +46,15 @@ type Config struct {
 	SnapshotThreshold uint64
 }
 
+// Batch caps (D022). A proposal counts as its data plus
+// raft.EntryOverheadBytes, as in the append cap, so a full batch fits one
+// capped append; a proposal over raft.MaxEntryBytes counts nothing, because it
+// is rejected on its own.
+const (
+	maxBatchEntries = 256
+	maxBatchBytes   = 1 << 20
+)
+
 type proposalResult struct {
 	index uint64
 	term  uint64
@@ -292,81 +301,151 @@ func (r *Runtime) run(tickInterval time.Duration) {
 	pending := make(map[uint64]pendingProposal)
 	pendingReads := make(map[uint64]pendingRead)
 	var nextReadContext uint64
+	// deferred holds events read while draining a batch, handled in arrival
+	// order before the queue is read again (D022).
+	var deferred []any
 	for {
-		select {
-		case <-ticker.C:
-			if err := r.processUpdate(r.node.Tick(), pending, pendingReads); err != nil {
+		var raw any
+		if len(deferred) > 0 {
+			raw, deferred = deferred[0], deferred[1:]
+		} else {
+			select {
+			case <-ticker.C:
+				if err := r.processUpdate(r.node.Tick(), pending, pendingReads); err != nil {
+					r.fail(err, pending, pendingReads)
+					return
+				}
+				continue
+			case raw = <-r.events:
+			}
+		}
+		switch event := raw.(type) {
+		case proposalEvent:
+			batch := []proposalEvent{event}
+			if len(deferred) == 0 {
+				batch, deferred = r.drainProposals(event)
+			}
+			if err := r.proposeBatch(batch, pending, pendingReads); err != nil {
 				r.fail(err, pending, pendingReads)
 				return
 			}
-		case raw := <-r.events:
-			switch event := raw.(type) {
-			case proposalEvent:
-				index, update, err := r.node.Propose(event.data)
-				if err != nil {
-					event.result <- proposalResult{err: err}
-					continue
-				}
-				pending[index] = pendingProposal{result: event.result}
-				if err := r.processUpdate(update, pending, pendingReads); err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-			case membershipEvent:
-				index, update, err := r.node.ProposeMembership(event.voters)
-				if err != nil {
-					event.result <- proposalResult{err: err}
-					continue
-				}
-				if index <= r.node.Status().CommitIndex {
-					event.result <- proposalResult{index: index}
-					continue
-				}
-				r.membership = &pendingMembership{voters: event.voters, result: event.result}
-				if err := r.processUpdate(update, pending, pendingReads); err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-			case messageEvent:
-				err := r.processUpdateWithSnapshot(r.node.Step(event.message), event.snapshotData, pending, pendingReads)
-				if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
-					r.acknowledgeRead(event.message, pendingReads)
-				}
-				event.result <- err
-				if err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-			case statusEvent:
-				event.result <- r.node.Status()
-			case readEvent:
-				nextReadContext++
-				contextID := nextReadContext
-				update, err := r.node.ReadProbe(contextID)
-				if err != nil {
-					event.result <- readResult{err: err}
-					continue
-				}
-				pendingReads[contextID] = pendingRead{
-					result: event.result, acks: map[uint64]struct{}{r.node.Status().ID: {}},
-				}
-				if err := r.processUpdate(update, pending, pendingReads); err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-				if r.node.HasQuorum(map[uint64]struct{}{r.node.Status().ID: {}}) {
-					event.result <- readResult{index: r.node.Status().CommitIndex}
-					delete(pendingReads, contextID)
-				}
-			case stopEvent:
-				err := r.closeResources()
-				event.result <- err
-				close(r.done)
-				close(r.outgoing)
+		case membershipEvent:
+			index, update, err := r.node.ProposeMembership(event.voters)
+			if err != nil {
+				event.result <- proposalResult{err: err}
+				continue
+			}
+			if index <= r.node.Status().CommitIndex {
+				event.result <- proposalResult{index: index}
+				continue
+			}
+			r.membership = &pendingMembership{voters: event.voters, result: event.result}
+			if err := r.processUpdate(update, pending, pendingReads); err != nil {
+				r.fail(err, pending, pendingReads)
 				return
 			}
+		case messageEvent:
+			err := r.processUpdateWithSnapshot(r.node.Step(event.message), event.snapshotData, pending, pendingReads)
+			if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
+				r.acknowledgeRead(event.message, pendingReads)
+			}
+			event.result <- err
+			if err != nil {
+				r.fail(err, pending, pendingReads)
+				return
+			}
+		case statusEvent:
+			event.result <- r.node.Status()
+		case readEvent:
+			nextReadContext++
+			contextID := nextReadContext
+			update, err := r.node.ReadProbe(contextID)
+			if err != nil {
+				event.result <- readResult{err: err}
+				continue
+			}
+			pendingReads[contextID] = pendingRead{
+				result: event.result, acks: map[uint64]struct{}{r.node.Status().ID: {}},
+			}
+			if err := r.processUpdate(update, pending, pendingReads); err != nil {
+				r.fail(err, pending, pendingReads)
+				return
+			}
+			if r.node.HasQuorum(map[uint64]struct{}{r.node.Status().ID: {}}) {
+				event.result <- readResult{index: r.node.Status().CommitIndex}
+				delete(pendingReads, contextID)
+			}
+		case stopEvent:
+			err := r.closeResources()
+			event.result <- err
+			close(r.done)
+			close(r.outgoing)
+			return
 		}
 	}
+}
+
+// drainProposals reads queued events without blocking and gathers proposals
+// behind first into one batch, up to maxBatchEntries proposals, maxBatchBytes
+// accounted bytes or a queue's worth of events. Other events, and a proposal
+// that would overflow the byte cap, are returned in arrival order.
+func (r *Runtime) drainProposals(first proposalEvent) (batch []proposalEvent, others []any) {
+	batch = []proposalEvent{first}
+	size := proposalBytes(first)
+	for drained := 0; drained < cap(r.events) && len(batch) < maxBatchEntries && size < maxBatchBytes; drained++ {
+		var raw any
+		select {
+		case raw = <-r.events:
+		default:
+			return batch, others
+		}
+		next, ok := raw.(proposalEvent)
+		if !ok {
+			others = append(others, raw)
+			continue
+		}
+		if size+proposalBytes(next) > maxBatchBytes {
+			return batch, append(others, raw)
+		}
+		batch = append(batch, next)
+		size += proposalBytes(next)
+	}
+	return batch, others
+}
+
+func proposalBytes(event proposalEvent) int {
+	if len(event.data) > raft.MaxEntryBytes {
+		return 0
+	}
+	return len(event.data) + raft.EntryOverheadBytes
+}
+
+// proposeBatch appends a batch with one ProposeBatch and persists it with one
+// update. Each proposal waits at its own index; one too large to append, or a
+// batch proposed on a non-leader, is answered at once.
+func (r *Runtime) proposeBatch(batch []proposalEvent, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
+	data := make([][]byte, len(batch))
+	for i, event := range batch {
+		data[i] = event.data
+	}
+	indexes, update, err := r.node.ProposeBatch(data)
+	if err != nil {
+		for _, event := range batch {
+			event.result <- proposalResult{err: err}
+		}
+		return nil
+	}
+	for i, event := range batch {
+		if indexes[i] == 0 {
+			event.result <- proposalResult{err: raft.ErrEntryTooLarge}
+			continue
+		}
+		pending[indexes[i]] = pendingProposal{result: event.result}
+	}
+	if len(update.Entries) == 0 {
+		return nil
+	}
+	return r.processUpdate(update, pending, pendingReads)
 }
 
 func (r *Runtime) processUpdate(update raft.Update, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {

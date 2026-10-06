@@ -180,6 +180,32 @@ func TestAppendEntriesPerCommittedEntryStaysBounded(t *testing.T) {
 	}
 }
 
+// TestLeaderBatchesConcurrentProposals pins D022's leader batching: with 8 or
+// 16 proposers, the leader persists more than one entry per log sync.
+func TestLeaderBatchesConcurrentProposals(t *testing.T) {
+	const writes = 400
+	for _, proposers := range []int{8, 16} {
+		t.Run(fmt.Sprintf("%d proposers", proposers), func(t *testing.T) {
+			replicas := startMemoryCluster(t)
+			leader := waitForMemoryLeader(t, replicas)
+			before := mustSnapshot(t, leader.metrics)
+			if err := proposeConcurrently(leader, proposers, writes); err != nil {
+				t.Fatal(err)
+			}
+			after := mustSnapshot(t, leader.metrics)
+			syncs := after["lsmdb_raft_log_syncs_total"] - before["lsmdb_raft_log_syncs_total"]
+			entries := after["lsmdb_raft_log_sync_entries_total"] - before["lsmdb_raft_log_sync_entries_total"]
+			if syncs == 0 {
+				t.Fatal("the leader recorded no log syncs")
+			}
+			t.Logf("leader: %v entries in %v log syncs, %.2f entries per sync", entries, syncs, entries/syncs)
+			if entries/syncs <= 1 {
+				t.Fatalf("leader entries per log sync = %.2f, want > 1", entries/syncs)
+			}
+		})
+	}
+}
+
 func TestLinearizableReadCompletesDuringConcurrentWrites(t *testing.T) {
 	replicas := startMemoryCluster(t)
 	leader := waitForMemoryLeader(t, replicas)

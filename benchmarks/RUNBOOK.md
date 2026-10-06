@@ -14,9 +14,13 @@ are smoke tests and must not be quoted as results.
 | `cmd/bench` | Embedded LSM vs SQLite workloads | `<date>-<sha12>-embedded.json` |
 | `scripts/vm_smoke_check.go` | Checks a `clusterbench` or `bench_compare` file before its numbers are used (section 5) | PASS/FAIL per check, a table of runs, exit 1 on any FAIL |
 | `scripts/sweep_table.go` | Reads result files with different `-duration` values (section 3d) | One row per run: duration, ops/s, appends per entry, ack_resend share |
+| `scripts/verify_readme.py` | Rebuilds every figure in the README's Results section from the committed compare JSON and large-value files, and checks that each appears in the README. Run from the repo root: `python3 scripts/verify_readme.py` | One line per figure and fact, ok or MISSING; exit 1 if any is missing |
+| `scripts/check_paths.py` | Checks that every path, link, anchor and `go run` target the README cites exists. Run from the repo root: `python3 scripts/check_paths.py` | One line per path, ok or MISSING; exit 1 if any is missing |
 
-`vm_smoke_check.go` and `sweep_table.go` only read result files. The three tools
-that write them have these properties:
+`vm_smoke_check.go` and `sweep_table.go` only read result files. `verify_readme.py`
+and `check_paths.py` only read the README, the result files and the repository
+tree. They need Python 3.6 or later and its standard library only. The three
+tools that write result files have these properties:
 - They never overwrite a file. A name collision gets `-2`, `-3`, and so on.
 - Secondary runs write to the OS temp dir. Official runs write to `benchmarks/results/`.
 - None of them writes `results.json` unless that path is passed with `-out` and does

@@ -292,6 +292,22 @@ from `658cfa0`. Decision: D021 (accepted).
 - [x] Secondary Mac check: `clusterbench -mode failover`, `658cfa0` against
   `69aeaea`, interleaved, labeled secondary: PASS (verification log).
 
+Findings (not fixed on this branch):
+
+- **Split votes can repeat. Candidate fix after phase 13, not part of this
+  branch.** In test (a) (lag 4, seed 7), the two survivors drew equal
+  election timeouts twice in a row, and failover took 26 ticks. The count is
+  the same with and without the lease. The draw is a deterministic linear
+  congruential generator taken modulo 5
+  (`ElectionTickMax - ElectionTickMin`; `resetElectionTimer`,
+  `internal/raft/node.go:940-945`), so equal draws are common. The runtime
+  seeds it with the node ID alone (`cluster/node.go:165`). Candidate fixes:
+  a wider range, or seeding by node ID and term.
+- **Lockstep test simulations can hide ordering bugs.** With test (iv)'s
+  one-step rejoin, the leader's heartbeat always reached the rejoining node
+  first, so removing the lease went undetected until the rejoin was split
+  into two steps.
+
 ## Verification Log
 
 - 2026-08-26 — pre-change `go test ./...` — PASS.

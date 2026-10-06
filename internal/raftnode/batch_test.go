@@ -276,6 +276,34 @@ func TestBatchCaps(t *testing.T) {
 	})
 }
 
+// TestDefaultQueueSplitsCapPlusOneQueuedProposals runs the default
+// configuration, whose event queue holds 256 events, as many as a batch holds
+// entries. Of 257 proposals queued behind a held persist, the 257th waits to
+// enter the full queue; the first 256 go in one persist and the 257th in the
+// next, and each completes at its own index.
+func TestDefaultQueueSplitsCapPlusOneQueuedProposals(t *testing.T) {
+	const batchCap = 256
+	runtime, gate := startGatedLeader(t, []uint64{1}, &memoryMachine{values: make(map[uint64]string)}, 0)
+	gate.holdNext()
+	results := []<-chan proposal{proposeAsync(runtime, []byte("held"))}
+	waitEntered(t, gate)
+	for i, payload := range payloads(batchCap, 8) {
+		results = append(results, proposeAsync(runtime, payload))
+		waitQueued(t, runtime, i+1)
+	}
+	results = append(results, proposeAsync(runtime, []byte("cap + 1")))
+	gate.release <- struct{}{}
+	// The no-op is index 1 and the held proposal index 2.
+	for i, result := range collect(t, results) {
+		if result.err != nil || result.index != uint64(i+2) {
+			t.Fatalf("proposal %d returned index %d error %v, want index %d", i, result.index, result.err, i+2)
+		}
+	}
+	if got := gate.entriesPerPersist(); !reflect.DeepEqual(got, []int{1, batchCap, 1}) {
+		t.Fatalf("entries per persist = %v, want [1 %d 1]", got, batchCap)
+	}
+}
+
 // demote sends the leader an empty append from node 2 at a higher term.
 func demote(ctx context.Context, runtime *raftnode.Runtime, term uint64) error {
 	return runtime.Step(ctx, raft.Message{Type: raft.MsgAppend, From: 2, To: 1, Term: term})

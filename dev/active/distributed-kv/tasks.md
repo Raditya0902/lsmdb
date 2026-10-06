@@ -210,13 +210,19 @@ Items in commit order:
   - The A3 failures are consistent with a transport backlog under race
     overhead. They are not shown to be caused by the race detector: 3 of 40
     against 0 of 40 is one-sided Fisher p ≈ 0.12 on its own.
-- [ ] Flush and compaction counted and timed in the engine; per-window deltas in
-  clusterbench JSON (`bench_compare summarize` unchanged).
-- [ ] `Runtime.Close` returns after the runtime has stopped itself (still nil).
-- [ ] Every entry of an incoming append validated before any in-memory change
+- [x] Flush and compaction counted and timed in the engine; per-window deltas in
+  clusterbench JSON (`bench_compare summarize` unchanged) (`e572346`).
+- [x] `Runtime.Close` returns after the runtime has stopped itself (still nil)
+  (`12547f5`).
+- [x] Every entry of an incoming append validated before any in-memory change
   (index, term > 0, size, terms non-decreasing, at least `LogTerm`, at most the
-  message term). A violation is dropped, counted and logged, with no reject.
-- [ ] The client's message limit uses the server constant.
+  message term). A violation is dropped, counted and logged, with no reject
+  (`f76d87e`).
+  - The checks read only the message, so they run in `Step` before the term
+    is adopted, the leader is recorded or the election timer is reset.
+  - The plan had placed them after the log-match check. This follows the
+    decision that every check runs before any in-memory change.
+- [x] The client's message limit uses the server constant (`5fe0489`).
 - [ ] Raft log format guard: versioned file, `raft.log` guard directory,
   refusal instead of truncation (D020), after the old-binary gate. Last and
   optional.
@@ -248,6 +254,10 @@ Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
 - **A buffered tick shortens an election timeout.** A 5-tick timeout fired
   83 ms after the timer reset: the runtime ticker can hold a tick that is
   delivered right after the reset.
+- **The client retries ResourceExhausted on every node** (`cluster/client.go`
+  `retry`): up to 60 attempts 25 ms apart. It then returns the last node's
+  error, so an oversized response surfaces as "node is not the Raft leader".
+  Found in item 6's receive-limit mutation.
 
 ## Verification Log
 
@@ -387,6 +397,20 @@ Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
   - After (b) `15cda40`: `go test -race -count=10 ./cluster` passes all 10
     iterations (A3 skipped). `LSMDB_RACE_STRESS=1` runs A3 under `-race` (3 of
     3 pass). gofmt, vet, `go test ./...` and `-race` pass (17 ok each).
+  - Items 2, 5, 4 and 6: each test failed first on the previous code.
+    - Item 2: build failures. Item 6: two mutations (its test cannot fail on
+      equal limits).
+    - Item 5: "runtime 2 of 32: Close did not return within 2s".
+    - Item 4: all 7 malformed cases were appended, and the conflict case also
+      truncated; the runtime stopped on the store's refusal.
+    - After each commit (`e572346`, `12547f5`, `f76d87e`, `5fe0489`): gofmt,
+      vet, `go test ./...` and `-race` pass, 17 ok each. No rule-1 re-run was
+      needed.
+  - Item 2 secondary Mac check (not a result, not committed): `aedb0dd` vs
+    `e572346`, 1 client, 5 repetitions, interleaved, 30 s windows.
+    - Median ops/s 107.5 vs 105.8 (−1.6%), within ±5%: PASS. 10 of 10 runs
+      valid.
+    - In one counters-arm window: 9 flushes, 0.31 s of 0.41 s apply time.
 
 ## Blockers
 
@@ -395,10 +419,9 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Phase 12b hardening: items 2, 5, 4 and 6 as separate commits, tests first, as
-in `dev/active/phase-12b-hardening/plan.md`. Then Step 1 (docs) of the vote
-lease (D021), which stops for approval. Item 3 (the log format guard) comes
-last and is optional.
+Vote lease (D021), Step 1 (docs) on `phase-12b-vote-lease`, which stops for
+approval. Phase 12b hardening item 3 (the log format guard) comes last and is
+optional.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

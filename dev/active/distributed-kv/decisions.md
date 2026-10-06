@@ -430,7 +430,8 @@ Consequences:
 
 ### D021 — A voter in lease ignores a higher-term vote request
 
-Status: proposed 2026-10-05 (phase 12b vote lease, Step 1), awaiting approval.
+Status: accepted 2026-10-05 (phase 12b vote lease). Implemented in `69aeaea`,
+with guard tests in `020f665`.
 
 Context:
 
@@ -446,49 +447,71 @@ Context:
 
 Decision:
 
-- **In lease**, one predicate for both handlers:
-  `role == Leader || (leaderID != 0 && electionElapsed < electionTimeout)`.
+- **In lease** (`inLease()`, vote path only):
+  `role == Leader || (leaderID != 0 && electionElapsed < ElectionTickMin)`.
   - A follower is in lease from processing an append or snapshot from the
-    leader until its randomized election timeout expires.
-  - A pre-candidate, a candidate, and a node that has just adopted a term are
-    never in lease (`leaderID == 0`).
+    leader until `ElectionTickMin` of its own ticks have passed.
+  - A pre-candidate, a candidate, a node that has just granted a vote and a
+    node that has just adopted a term are never in lease (`leaderID == 0`).
   - A leader is in lease while it is leader. Its `electionElapsed` still does
     not advance; the role test replaces the reliance on that frozen counter.
   - A leader leaves its lease only by leaving the role: through check-quorum
     (at most `2 × CheckQuorumTicks` ticks after its last quorum contact),
     through removal from the voter set, or by adopting a higher term from a
     message it accepts.
-- **Where:** in `Step`, before the higher-term adoption. A `MsgVote` with a
-  term above this node's, received in lease, is ignored. The term, vote,
-  leader, election timer and log stay unchanged, and nothing is persisted or
-  sent. Same-term vote requests are handled as before.
+- **Length: the minimum election timeout, not the node's randomized draw.**
+  The randomized timeout spreads campaigns so that two nodes rarely start
+  together; it is not a safety window. A node that drew a timeout near the
+  minimum would leave its lease sooner anyway, so the minimum is the only
+  length every node guarantees. As in etcd, the lease never extends past
+  `ElectionTickMin` ticks (`TestVoteLeaseEndsAtMinimumElectionTimeout`).
+- **Pre-vote is unchanged.** It keeps its own check,
+  `leaderID != 0 && electionElapsed < electionTimeout` on the randomized draw.
+  An in-lease receiver still replies with a rejection that carries its own
+  term (D017). Pre-vote requests never adopt a term. A follower that knows a
+  leader never reaches its randomized timeout without first becoming a
+  pre-candidate, which clears the leader, so for followers that check
+  reduces to `leaderID != 0`.
+- **Where:** in `Step`, after the malformed-append check and before the
+  higher-term adoption. A `MsgVote` with a term above this node's, received
+  in lease, is ignored. The term, vote, leader, election timer and log stay
+  unchanged, and nothing is persisted or sent. Same-term vote requests are
+  handled as before.
 - **Silent, not rejected:** any reply would carry the voter's lower term. The
   candidate answers a lower-term message through `rejectStale` at its higher
   term (`:772-786`), and the voter would adopt that term, leaving its lease
   within one round trip.
-- **Pre-vote is unchanged:** an in-lease receiver still replies with a
-  rejection that carries its own term (D017). Pre-vote requests never adopt a
-  term.
+- **Counted:** `raft.Status.VotesIgnoredInLease`. There is no cluster metric.
 - **With D017:** D017 adopts a term only from a rejected pre-vote response,
   which only a pre-candidate receives, and a pre-candidate is never in lease.
   An ignored vote sends nothing, so it never feeds that path. The A2 deadlock
-  has no leader and therefore no lease.
+  has no leader and therefore no lease; its test still elects, and still
+  fails without D017's adoption.
 
 Consequences:
 
 - An election like the two observed fails instead of deposing a leader that a
-  majority can still hear.
-- **Failover after a leader stop is unchanged:** a voter can re-enter its
-  lease only by hearing the stopped leader. Tests record per-seed tick counts
-  before and after.
-- **A node that really holds a higher term** still costs one leader change.
-  Its votes are ignored, but its append responses at that term make the
-  leader step down. This is required for it to rejoin, and etcd does the same.
-- **Lease length:** the lease is counted in the node's own ticks. A busy event
-  loop drops ticks and lengthens it in wall time; a buffered tick shortens it
-  by up to one tick.
-- **Not changed:** heartbeats and in-flight limits (phase 13 Step 1), the
-  check-quorum window, and `rejectStale` answering stale responses.
+  majority can still hear (`TestVoterInLeaseIgnoresHigherTermVote`).
+- **Failover after a leader stop is unchanged.** A survivor grants a pre-vote
+  only once its own timeout has cleared its leader, so by the time any vote
+  request reaches it, it is out of lease. The worst delay the lease can add
+  is `ElectionTickMin` ticks, which is no longer than one election timeout.
+  The tests found none: over 20 seeds and three staggers, no vote request
+  was ignored after the leader stopped, and every per-seed tick count was
+  identical before and after.
+- **A stuck leader cannot block an election.** A leader that loses its
+  quorum steps down within `2 × CheckQuorumTicks` ticks, clears its leader
+  and is then out of lease.
+- **A node that really holds a higher term** still costs exactly one leader
+  change. Its votes are ignored, but its append responses at that term make
+  the leader step down. This is required for it to rejoin, and etcd does the
+  same (`TestRejoiningNodeWithHigherTermCausesOneLeaderChange`).
+- **Real-time lease length follows tick drift.** The lease is counted in the
+  node's own ticks. A busy event loop drops ticks and lengthens it in wall
+  time; a buffered tick shortens it by up to one tick.
+- **Not changed:** heartbeats and in-flight limits (phase 13 Step 1, which is
+  D019's phase 12c), the check-quorum window, and `rejectStale` answering
+  stale responses.
 
 ## Decision Changes
 

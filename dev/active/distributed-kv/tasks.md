@@ -12,7 +12,9 @@ Phases 11, 10, 12a and 12b are complete on stacked branches:
 `phase-12a-dup-ack-fix`, then `phase-12b-append-size-and-log-copy`. None is
 merged into `main` (`bd67696`) yet.
 
-Phase details are in `dev/active/phase-12b-hardening/`.
+Phase details are in `dev/active/phase-12b-hardening/`. The vote lease (D021)
+is done on branch `phase-12b-vote-lease`, created from `658cfa0`
+(`dev/active/phase-12b-vote-lease/`).
 
 ## Completed
 
@@ -222,6 +224,13 @@ Items in commit order:
     is adopted, the leader is recorded or the election timer is reset.
   - The plan had placed them after the log-match check. This follows the
     decision that every check runs before any in-memory change.
+  - **A leader whose appends are dropped as malformed gets replaced.** A
+    dropped append does not reset the follower's election timer or record the
+    leader, so followers that receive only malformed appends campaign. When an
+    election follows such drops, it is the drop, not a transport fault:
+    check `MalformedAppendsDropped` in `Status`, the runtime log line
+    "raft: dropped malformed append" and
+    `lsmdb_raft_malformed_appends_dropped_total` first.
 - [x] The client's message limit uses the server constant (`5fe0489`).
 - [ ] Raft log format guard: versioned file, `raft.log` guard directory,
   refusal instead of truncation (D020), after the old-binary gate. Last and
@@ -229,7 +238,8 @@ Items in commit order:
 
 Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
 
-- **Prerequisite decision for phase 13 Step 1, not work to start now:**
+- **Prerequisite decision for phase 13 Step 1 (D019's phase 12c), not work to
+  start now:**
   heartbeats re-ship multi-MiB entries with no in-flight limit. A heartbeat
   is a full append from `nextIndex` (`internal/raft/node.go:700-715`), and
   `nextIndex` moves only on acks. Each send is its own goroutine with a
@@ -239,12 +249,13 @@ Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
   - Followers went up to 1,013 ms without leader contact. There were up to 204
     deadline failures per node per run.
   - Phase 13 Step 1 decides between entry-less heartbeats and an in-flight
-    limit, lite or full. These are D019's phase-12c items, and each must keep
+    limit, lite or full. These are D019's phase-12c items: "phase 12c" in
+    D019 and "phase 13 Step 1" here name the same work. Each option must keep
     a catch-up path that meets D019's recovery bound.
-- **The vote handler has no lease check.** `handleVote` (`node.go:435-450`)
-  has none, and `Step` adopts any higher term first (`:142-147`).
-  `handlePreVote` has one (`:401-402`). In 2 of 15 elections a node voted 2.8
-  and 9.6 ms after hearing the current leader.
+- **The vote handler has no lease check** (fixed by D021, `69aeaea`).
+  `handleVote` (`node.go:435-450`) had none, and `Step` adopts any higher
+  term first (`:142-147`). `handlePreVote` has one (`:401-402`). In 2 of 15
+  elections a node voted 2.8 and 9.6 ms after hearing the current leader.
 - **A deposed leader's sends keep running for up to 500 ms**, because they
   are not cancelled on step-down. In one run, 43 sends from the old term were
   still expiring after the new leader took over.
@@ -262,15 +273,24 @@ Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
 ## Phase 12b Vote Lease
 
 Details: `dev/active/phase-12b-vote-lease/`. Branch `phase-12b-vote-lease`
-from `658cfa0`. Decision: D021 (proposed).
+from `658cfa0`. Decision: D021 (accepted).
 
 - [x] Step 1 (docs): context, plan, tasks and D021. Re-verified `node.go`
   `:153-159`, `:413-414` and `:447-462` (at `e1123fc`: `:142-147`,
   `:401-402`, `:435-450`; the code is unchanged).
-- [ ] Step 2: `inLease()` and the vote check in `Step`, tests (i)–(v) first,
-  mutations for the guard tests. Waiting for approval.
-- [ ] Secondary Mac check: `clusterbench -mode failover` before and after,
-  interleaved, labeled secondary.
+- [x] Guard tests first (`020f665`): (ii) out of lease, a vote is granted;
+  (iv) a rejoining node with an unchanged term does not depose the leader;
+  (iv-b) a node with a really higher term costs exactly one leader change;
+  (v) failover within `2 × ElectionTickMax` ticks over 20 seeds; (a) no vote
+  ignored after a leader stop; (b) a leader that loses its quorum steps down
+  within `2 × CheckQuorumTicks` ticks and is then out of lease. (iii) is the
+  existing A2 tests.
+- [x] The change (`69aeaea`): `inLease()` on the minimum election timeout,
+  the silent vote check in `Step`, and `Status.VotesIgnoredInLease`. Test (i)
+  and the minimum-timeout test failed first. Every guard fails under its
+  mutation.
+- [x] Secondary Mac check: `clusterbench -mode failover`, `658cfa0` against
+  `69aeaea`, interleaved, labeled secondary: PASS (verification log).
 
 ## Verification Log
 
@@ -424,6 +444,41 @@ from `658cfa0`. Decision: D021 (proposed).
     - Median ops/s 107.5 vs 105.8 (−1.6%), within ±5%: PASS. 10 of 10 runs
       valid.
     - In one counters-arm window: 9 flushes, 0.31 s of 0.41 s apply time.
+- 2026-10-05, phase 12b vote lease (branch `phase-12b-vote-lease`):
+  - Step 1 `c58c030`: docs only. gofmt, vet, `go test ./...` and `-race`
+    pass (17 ok each).
+  - Guard tests `020f665`, on the code before the change: all pass. (a) has
+    no tick bound: on this code lag 4, seed 7 took 26 ticks after two split
+    votes, without the lease.
+  - Before the change (the Status field added alone): (i) failed with "node
+    3: term 1 -> 2, votedFor 1 -> 2" and leader 1 deposed ("follower at 2,
+    want leader at 1"). The minimum-timeout test failed at elapsed 0 and 4.
+  - After `69aeaea`: all pass. Per-seed failover tick counts for (v) and (a)
+    are identical before and after (80 of 80 lines).
+  - Mutations, each failing the guard at its own assertion:
+    - pre-candidates in lease fails (ii);
+    - no lease on either path fails (iv);
+    - lease on the randomized timeout, or with no elapsed bound, fails the
+      minimum-timeout test;
+    - lease counted from the last timer reset fails (v), (a) and (b);
+    - check-quorum never stepping down fails (b);
+    - removing D017's adoption fails (iii);
+    - no reply to a lower-term append fails (iv-b);
+    - the check moved after term adoption fails (i).
+  - After each commit: gofmt, vet, `go test ./...` and `-race` pass, 17 ok
+    each. No rule-1 re-run was needed.
+  - Secondary Mac check (not a result, not committed): `658cfa0` against
+    `69aeaea`, `clusterbench -mode failover`, 1 client, 10 repetitions
+    interleaved, 5 s warmup, 10 s windows; load average 2.3 at the start
+    and 3.1 at the end.
+    - Pass rule set in `plan.md` before running: every probe succeeds, and
+      the median `failover_ms` is within ±25% or the ranges overlap.
+    - Probes: 10 of 10 in each arm. Median `failover_ms` 223.3 (pre) against
+      209.9 (lease), −6.0%; ranges 154.5–267.4 and 136.4–263.6. PASS.
+    - Observation, not a result: 2 pre-arm windows had 2 elections each
+      (term 1 -> 3) and were invalid for throughput; the lease arm had none
+      in 10. That is 2 of 10 against 0 of 10, too few to separate.
+      Throughput: not meaningful (ranges overlap).
 
 ## Blockers
 
@@ -432,8 +487,8 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Vote lease (D021): Step 1 is done and waits for approval before Step 2. Phase
-12b hardening item 3 (the log format guard) comes last and is optional.
+Vote lease (D021) is done on `phase-12b-vote-lease`. Phase 12b hardening item
+3 (the log format guard) comes last and is optional, and is not started.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

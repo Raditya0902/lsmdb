@@ -16,6 +16,10 @@ Phase details are in `dev/active/phase-12b-hardening/`. The vote lease (D021)
 is done on branch `phase-12b-vote-lease`, created from `658cfa0`
 (`dev/active/phase-12b-vote-lease/`).
 
+Phase 13 (Raft group commit, D022 proposed) is at Step 1 (docs) on branch
+`phase-13-group-commit`, created from `d0e7c26`
+(`dev/active/phase-13-group-commit/`). No code before approval.
+
 ## Completed
 
 - [x] Confirm existing repository structure and embedded interface.
@@ -308,6 +312,30 @@ Findings (not fixed on this branch):
   first, so removing the lease went undetected until the rejoin was split
   into two steps.
 
+## Phase 13 — Raft Group Commit
+
+Details: `dev/active/phase-13-group-commit/`. Branch `phase-13-group-commit`
+from `d0e7c26`. Decision: D022 (proposed). "Phase 13 Step 1" here and
+"phase 12c" in D019 name the same prerequisite work.
+
+- [x] Step 1 (docs): context, plan, tasks and D022. Re-verified every
+  location in analysis report §2A at `d0e7c26`.
+  - Changed since the report: the resend rule (D018), the append cap and the
+    follower log copy (D019), and the follower commit rule (phase 11).
+  - Every other location moved but is unchanged in substance.
+  - Recommended prerequisite: one outstanding entry-carrying append per
+    follower, resent after 5 ticks.
+  - Thresholds P1–P6 pre-registered against the copy arm `18369e8`.
+- [ ] Step 2: clusterbench leader/follower sync split (diagnostic).
+- [ ] Step 3: in-flight limit lite; lift the A3 `-race` skip only on 10 of 10.
+- [ ] Step 4: entry term in the write result (report rank 14).
+- [ ] Step 5: leader batching.
+- [ ] Step 6: follower coalescing.
+- [ ] Step 7: reads share one probe.
+- [ ] Step 8: VM comparison (storm `bfa2a77`, copy `18369e8`, new; 1, 4 and
+  16 clients); needs approval for the VM.
+- [ ] Step 9: results and docs.
+
 ## Verification Log
 
 - 2026-08-26 — pre-change `go test ./...` — PASS.
@@ -495,6 +523,8 @@ Findings (not fixed on this branch):
       (term 1 -> 3) and were invalid for throughput; the lease arm had none
       in 10. That is 2 of 10 against 0 of 10, too few to separate.
       Throughput: not meaningful (ranges overlap).
+- 2026-10-05, phase 13 Step 1 (`phase-13-group-commit`): docs only, no code.
+  Nothing to run.
 
 ## Blockers
 
@@ -505,6 +535,9 @@ authenticated registry remains deferred.
 
 Vote lease (D021) is done on `phase-12b-vote-lease`. Phase 12b hardening item
 3 (the log format guard) comes last and is optional, and is not started.
+
+Phase 13 Step 1 (docs) is done and waits for approval of D022 and the open
+questions in the phase plan. No code before it.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

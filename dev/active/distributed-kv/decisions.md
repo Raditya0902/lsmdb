@@ -513,6 +513,102 @@ Consequences:
   D019's phase 12c), the check-quorum window, and `rejectStale` answering
   stale responses.
 
+### D022 — One outstanding append per follower, then leader batches and follower coalescing
+
+Status: proposed 2026-10-05 (phase 13 Step 1). Details and line numbers at
+`d0e7c26` are in `dev/active/phase-13-group-commit/`.
+
+Context:
+
+- Every committed entry costs exactly 3.0 log syncs at every client count.
+  The official copy arm (`18369e8`, `2026-10-05-p12b-compare.json`) ran at
+  440.83 ops/s at 4 clients and 408.93 at 16, with 1.00 entries per sync.
+- Heartbeats, proposal broadcasts and commit broadcasts all ship the capped
+  chunk from `nextIndex` (`internal/raft/node.go:750-765`). Each send is its
+  own goroutine with a 500 ms deadline (`internal/raftnode/runtime.go:526-555`).
+  - A3 diagnostics: a lagging follower was sent the same 2.5 MiB entry
+    every 20 ms tick, and saw up to 204 deadline failures per node per run.
+  - Followers went up to 1,013 ms without leader contact.
+  - Two check-quorum step-downs occurred in one run.
+- D018 and D019 rely on heartbeats carrying entries for catch-up:
+  (R + C + k) × `HeartbeatTicks` ticks. Entry-less heartbeats alone would
+  leave a lost append unsent once proposals stop, because a non-advancing ack
+  sends nothing (`:699-704`).
+
+Decision (proposed):
+
+1. **In-flight limit, lite (this is D019's phase 12c).**
+   - At most one entry-carrying append is outstanding per follower.
+   - It stays outstanding until one of these happens: an ack advances
+     `matchIndex` to its last index, a rejection arrives, or 5 ticks pass
+     (`inflightResendTicks`, unexported).
+   - While one is outstanding, every append to that follower is entry-less
+     at `nextIndex - 1` and carries `LeaderCommit`. This covers heartbeats,
+     proposal and commit broadcasts, and read probes.
+   - Otherwise the capped chunk is sent, as today.
+   - Snapshots are unchanged: the gRPC adapter already allows one stream
+     per peer.
+   - **Rejected alternatives:**
+     - Entry-less heartbeats alone (option A) still send about one copy of
+       a slow chunk per tick, because a heartbeat ack overtakes the chunk.
+     - A full window (option C) needs optimistic `nextIndex`, reject echo
+       and a new proof of D018's termination.
+2. **The write result carries the entry's term** (report rank 14). The write
+   handler then stops queuing a status event per write
+   (`cluster/node.go:301`).
+3. **Leader batching.**
+   - `Node.ProposeBatch` appends in input order and returns one `Update`.
+     Each oversize item fails on its own.
+   - The runtime drains queued events without blocking, up to 256 proposals,
+     1 MiB accounted as in `cappedEntries`, or the queue size, and always
+     takes at least one proposal.
+   - Other events drained go into a FIFO, handled in arrival order after the
+     batch.
+   - No linger. One `Persist` per batch. Each request completes once, at
+     its own index.
+4. **Follower coalescing.**
+   - Queued appends from the same leader and term are stepped and merged,
+     with the same caps.
+   - Merging stops at an update with hard state, truncation, a snapshot or
+     a role change: the prefix is persisted first, then that update alone.
+   - One `Persist`, then every response is sent (none dropped, because they
+     carry ReadIndex contexts), then every RPC completes.
+5. **Reads drained together share one probe context.**
+
+Consequences (expected; Step 9 records what was measured):
+
+- **Catch-up:**
+  - Delivered rounds chain on acks as today.
+  - A lost round waits up to `inflightResendTicks` (5) instead of
+    `HeartbeatTicks` (1). D019's worst case becomes
+    (R + C + k) × `inflightResendTicks` ticks, plus one delivery and one
+    persist per round.
+  - At most 5 copies of a chunk are in flight per follower, against 25.
+- **Heartbeats are small while bulk data is outstanding,** so check-quorum
+  and follower election timers no longer wait behind multi-MiB transfers. The
+  A3 `-race` skip is lifted only if 10 of 10 runs pass.
+- **Followers receive batched appends** even before follower coalescing.
+  While an append is outstanding, entries accumulate, and D018's follow-up
+  carries them.
+- **Unchanged:**
+  - persist before any dependent response;
+  - commit on a current-term majority;
+  - dedup in one `ApplyBatch` per index;
+  - truncation only of uncommitted conflicts;
+  - apply in the event loop.
+- **Out of scope:**
+  - async leader persistence;
+  - leveled compaction;
+  - snapshots, flush and compaction off the loop;
+  - batched apply;
+  - linger;
+  - the full window;
+  - reject echo;
+  - an ordered sender.
+- **Acceptance:** the pre-registered VM thresholds in the phase plan
+  (P1–P6), on three arms: storm `bfa2a77`, copy `18369e8` and the phase 13
+  tip, at 1, 4 and 16 clients.
+
 ## Decision Changes
 
 Add a new numbered entry explaining the reason and consequences instead of

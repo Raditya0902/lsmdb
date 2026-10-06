@@ -110,3 +110,73 @@ func TestSharedProbeStillNeedsQuorum(t *testing.T) {
 		}
 	}
 }
+
+// waitProbes waits up to timeout for probes to peer to carry n distinct read
+// contexts and returns the contexts seen.
+func waitProbes(transport *captureTransport, peer uint64, n int, timeout time.Duration) map[uint64]bool {
+	deadline := time.Now().Add(timeout)
+	contexts := probeContexts(transport, peer)
+	for len(contexts) < n && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		contexts = probeContexts(transport, peer)
+	}
+	return contexts
+}
+
+func ackProbe(t *testing.T, runtime *raftnode.Runtime, term, logIndex, readContext uint64) {
+	t.Helper()
+	ack := raft.Message{Type: raft.MsgAppendResponse, From: 2, To: 1, Term: term, LogIndex: logIndex, Context: readContext}
+	if err := runtime.Step(context.Background(), ack); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLateReadGetsItsOwnProbe(t *testing.T) {
+	runtime, _, transport, term := readyLeader(t)
+	early := readAsync(runtime, 5*time.Second)
+	earlyContexts := waitProbes(transport, 2, 1, 5*time.Second)
+	if len(earlyContexts) != 1 {
+		t.Fatalf("early read sent %d probe contexts, want 1", len(earlyContexts))
+	}
+
+	// A write commits while the early probe is unanswered.
+	written := proposeAsync(runtime, []byte("x"))
+	waitForStatus(t, runtime, func(status raft.Status) bool { return status.LastLogIndex == 2 })
+	ackProbe(t, runtime, term, 2, 0)
+	if result := <-written; result.err != nil || result.index != 2 {
+		t.Fatalf("write returned index %d error %v, want index 2", result.index, result.err)
+	}
+
+	late := readAsync(runtime, 5*time.Second)
+	var lateContext uint64
+	for readContext := range waitProbes(transport, 2, 2, time.Second) {
+		if !earlyContexts[readContext] {
+			lateContext = readContext
+		}
+	}
+	for readContext := range earlyContexts {
+		ackProbe(t, runtime, term, 2, readContext)
+	}
+	if outcome := <-early; outcome.err != nil {
+		t.Fatalf("early read returned error %v after its quorum ack", outcome.err)
+	}
+	time.Sleep(20 * time.Millisecond) // a late read completed by the same ack would have returned by now
+	select {
+	case outcome := <-late:
+		t.Fatalf("late read returned index %d error %v on the earlier probe's ack, want it to wait for its own probe", outcome.index, outcome.err)
+	default:
+	}
+	if lateContext == 0 {
+		t.Fatal("late read sent no probe of its own")
+	}
+
+	ackProbe(t, runtime, term, 2, lateContext)
+	select {
+	case outcome := <-late:
+		if outcome.err != nil || outcome.index != 2 {
+			t.Fatalf("late read returned index %d error %v, want index 2, the commit index at its arrival", outcome.index, outcome.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("late read did not complete after its own probe's quorum ack")
+	}
+}

@@ -243,6 +243,9 @@ func (n *Node) CreateSnapshot(index uint64, data []byte) (Update, error) {
 
 // Propose appends a command on the leader and starts replication.
 func (n *Node) Propose(data []byte) (uint64, Update, error) {
+	if len(data) > MaxEntryBytes {
+		return 0, Update{}, ErrEntryTooLarge
+	}
 	if n.role != Leader {
 		return 0, Update{}, ErrNotLeader
 	}
@@ -621,7 +624,10 @@ func (n *Node) handleAppendResponse(message Message) Update {
 		} else if next > 1 {
 			next--
 		}
-		n.nextIndex[message.From] = max(1, next)
+		// Everything through matchIndex matches this term's log, so a rejection
+		// below it is stale. Under capped appends, letting it lower nextIndex
+		// would re-ship an already-matched chunk forever (D019).
+		n.nextIndex[message.From] = max(1, next, n.matchIndex[message.From]+1)
 		return Update{Messages: []Message{n.appendMessage(message.From, message.Context, OriginAckResend)}}
 	}
 	advanced := false
@@ -695,9 +701,31 @@ func (n *Node) appendMessage(peer, context uint64, origin MessageOrigin) Message
 	return Message{
 		Type: MsgAppend, From: n.cfg.ID, To: peer, Term: n.term,
 		LogIndex: next - 1, LogTerm: n.termAt(next - 1),
-		Entries: n.entriesBetween(next, n.lastIndex()+1), LeaderCommit: n.commit,
+		Entries: n.cappedEntries(next), LeaderCommit: n.commit,
 		Context: context, Origin: origin,
 	}
+}
+
+// cappedEntries returns the entries from index from whose accounted size fits
+// the per-message cap, always at least one, so a single larger entry still
+// ships alone (D019).
+func (n *Node) cappedEntries(from uint64) []Entry {
+	if from <= n.snapshot.Index || from > n.lastIndex() {
+		return nil
+	}
+	limit := n.cfg.maxAppendBytes
+	if limit == 0 {
+		limit = defaultMaxAppendBytes
+	}
+	to, size := from, uint64(0)
+	for ; to <= n.lastIndex(); to++ {
+		entrySize := uint64(len(n.log[to-n.snapshot.Index-1].Data)) + EntryOverheadBytes
+		if to > from && size+entrySize > limit {
+			break
+		}
+		size += entrySize
+	}
+	return n.entriesBetween(from, to)
 }
 
 func (n *Node) rejectStale(message Message) Message {

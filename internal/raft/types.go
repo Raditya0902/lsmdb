@@ -159,6 +159,8 @@ type Config struct {
 	RandomSeed       uint64
 	// AppliedIndex is a commit watermark derived from a durable state machine on restart.
 	AppliedIndex uint64
+	// maxAppendBytes overrides the per-message entry cap; tests only (D019).
+	maxAppendBytes uint64
 }
 
 func (c Config) validate() error {
@@ -216,6 +218,22 @@ var (
 	ErrMembershipChangeInProgress = errors.New("raft membership change is already in progress")
 	// ErrNoMembershipChange means the requested voter set is already active.
 	ErrNoMembershipChange = errors.New("requested raft membership is already active")
+	// ErrEntryTooLarge rejects a proposal whose data exceeds MaxEntryBytes.
+	ErrEntryTooLarge = fmt.Errorf("raft entry data exceeds %d bytes", MaxEntryBytes)
+)
+
+// Entry and message size bounds (D019). The core imports no protobuf; the
+// transport adapter's tests check these bounds against encoded sizes.
+const (
+	// MaxEntryBytes bounds one entry's data. It covers a key-value command with a
+	// 4 MiB value and a 16 KiB key, and the stores use the same limit.
+	MaxEntryBytes = 4<<20 + 32<<10
+	// EntryOverheadBytes bounds one entry's framing inside an append message.
+	EntryOverheadBytes = 32
+	// MessageEnvelopeBytes bounds an append message's fields other than entries.
+	MessageEnvelopeBytes = 121
+	// defaultMaxAppendBytes caps the accounted entry bytes in one append.
+	defaultMaxAppendBytes = 1 << 20
 )
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {

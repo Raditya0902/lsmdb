@@ -54,7 +54,8 @@ type memoryReplica struct {
 // with the benchmark's Raft settings and the phase-10 counting wrappers. The
 // network steps each message synchronously under the sender's context, so the
 // runtime's 500 ms send deadline and bounded event queue apply as over gRPC.
-func startMemoryCluster(t *testing.T) map[uint64]*memoryReplica {
+// Each wrap, if given, sits between the network adapter and the counters.
+func startMemoryCluster(t *testing.T, wraps ...func(raftnode.Transport) raftnode.Transport) map[uint64]*memoryReplica {
 	t.Helper()
 	network := raftnet.New()
 	replicas := make(map[uint64]*memoryReplica)
@@ -71,9 +72,13 @@ func startMemoryCluster(t *testing.T) map[uint64]*memoryReplica {
 			t.Fatal(err)
 		}
 		metrics := newNodeMetrics(id)
+		var transport raftnode.Transport = network.Adapter(id)
+		for _, wrap := range wraps {
+			transport = wrap(transport)
+		}
 		runtime, err := raftnode.Start(raftnode.Config{TickInterval: 20 * time.Millisecond}, node,
 			&observedStore{inner: store, metrics: metrics},
-			&observedTransport{inner: network.Adapter(id), metrics: metrics}, &countingMachine{})
+			&observedTransport{inner: transport, metrics: metrics}, &countingMachine{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,6 +127,11 @@ func totalAppends(t *testing.T, replicas map[uint64]*memoryReplica) float64 {
 // proposeConcurrently writes count commands from the given number of
 // goroutines, all through the leader, and returns the first failure.
 func proposeConcurrently(leader *memoryReplica, proposers, count int) error {
+	return proposeData(leader, proposers, count, func(i int) []byte { return []byte(fmt.Sprintf("write-%d", i)) })
+}
+
+// proposeData is proposeConcurrently with the payload of write i from data.
+func proposeData(leader *memoryReplica, proposers, count int, data func(int) []byte) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, count)
 	for p := 0; p < proposers; p++ {
@@ -130,7 +140,7 @@ func proposeConcurrently(leader *memoryReplica, proposers, count int) error {
 			defer wg.Done()
 			for i := p; i < count; i += proposers {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_, err := leader.runtime.Propose(ctx, []byte(fmt.Sprintf("write-%d", i)))
+				_, err := leader.runtime.Propose(ctx, data(i))
 				cancel()
 				if err != nil {
 					errs <- fmt.Errorf("write %d: %w", i, err)

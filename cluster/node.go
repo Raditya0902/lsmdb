@@ -196,8 +196,8 @@ func StartNode(config NodeConfig) (*Node, error) {
 		server: grpc.NewServer(
 			grpc.UnaryInterceptor(metrics.unaryInterceptor),
 			grpc.StreamInterceptor(metrics.streamInterceptor),
-			grpc.MaxRecvMsgSize(kvstate.MaxValueBytes+64*1024),
-			grpc.MaxSendMsgSize(kvstate.MaxValueBytes+64*1024),
+			grpc.MaxRecvMsgSize(serverMessageLimit),
+			grpc.MaxSendMsgSize(serverMessageLimit),
 		),
 		listener: listener,
 	}
@@ -253,6 +253,10 @@ func (n *Node) Close() error {
 	})
 	return n.closeErr
 }
+
+// serverMessageLimit bounds every gRPC message a node receives or sends. The
+// largest Raft append, one entry of raft.MaxEntryBytes, must fit (D019).
+const serverMessageLimit = kvstate.MaxValueBytes + 64<<10
 
 type handler struct {
 	lsmdbv1.UnimplementedKVServer
@@ -453,6 +457,9 @@ func (n *Node) rpcError(err error) error {
 			return withDetail.Err()
 		}
 		return base.Err()
+	}
+	if errors.Is(err, raft.ErrEntryTooLarge) {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if errors.Is(err, raft.ErrReadNotReady) {
 		return status.Error(codes.Unavailable, err.Error())

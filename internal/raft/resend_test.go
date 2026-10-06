@@ -92,6 +92,33 @@ func TestAdvancingAckWithPendingEntriesSendsNextAppend(t *testing.T) {
 	}
 }
 
+// freshLeaderAheadOfFollowers elects node 1 with a three-entry log over
+// followers holding only index 1, and loses the no-op append. The leader's
+// nextIndex is then optimistic (4) while no follower has acked (matchIndex 0).
+func freshLeaderAheadOfFollowers(t *testing.T) *Node {
+	t.Helper()
+	nodes := make(map[uint64]*Node)
+	for id := uint64(1); id <= 3; id++ {
+		entries := []Entry{{Index: 1, Term: 1}}
+		if id == 1 {
+			entries = append(entries, Entry{Index: 2, Term: 1}, Entry{Index: 3, Term: 1})
+		}
+		node, err := New(testConfig(id), HardState{Term: 1}, entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes[id] = node
+	}
+	leader := nodes[1]
+	for tick := 0; tick < 20 && leader.Status().Role != Leader; tick++ {
+		route(t, nodes, leader.Tick().Messages, func(message Message) bool { return message.Type == MsgAppend })
+	}
+	if leader.Status().Role != Leader {
+		t.Fatal("node 1 did not become leader")
+	}
+	return leader
+}
+
 func TestRejectionStillProbesWithLowerNextIndex(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -103,8 +130,7 @@ func TestRejectionStillProbesWithLowerNextIndex(t *testing.T) {
 		{"no hint decrements nextIndex", 0, 2, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			leader, _ := leaderWithPendingEntries(t)
-			leader.Step(ack(leader, 3, 3)) // nextIndex[3] = 4
+			leader := freshLeaderAheadOfFollowers(t) // nextIndex[3] = 4, matchIndex[3] = 0
 			reject := Message{Type: MsgAppendResponse, From: 3, To: 1, Term: leader.Status().Term, Reject: true, RejectHint: tc.hint}
 			appends := appendsTo(leader.Step(reject), 3)
 			if len(appends) != 1 {
@@ -116,6 +142,17 @@ func TestRejectionStillProbesWithLowerNextIndex(t *testing.T) {
 			}
 		})
 	}
+	t.Run("stale rejection below matchIndex", func(t *testing.T) {
+		// After an ack for index 3, a rejection naming index 2 is stale: nextIndex
+		// stays at matchIndex + 1 (D019).
+		leader, _ := leaderWithPendingEntries(t)
+		leader.Step(ack(leader, 3, 3))
+		reject := Message{Type: MsgAppendResponse, From: 3, To: 1, Term: leader.Status().Term, Reject: true, RejectHint: 2}
+		appends := appendsTo(leader.Step(reject), 3)
+		if len(appends) != 1 || appends[0].LogIndex != 3 {
+			t.Fatalf("probe after a stale rejection = %+v, want prev 3", appends)
+		}
+	})
 }
 
 func TestFollowerCatchesUpThroughHeartbeatAfterLoss(t *testing.T) {

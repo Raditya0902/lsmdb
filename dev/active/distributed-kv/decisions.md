@@ -252,8 +252,10 @@ Context:
 Decision:
 
 1. **Byte cap.** `appendMessage` takes entries from `nextIndex` while the
-   accounted size stays at or under `Config.MaxAppendBytes` (default 1 MiB), and
-   always takes at least one entry.
+   accounted size stays at or under 1 MiB, and always takes at least one entry.
+   - Only tests can change the cap, through the unexported
+     `Config.maxAppendBytes`. Production configs cannot set it, so they always
+     run with the 1 MiB default.
    - An entry counts as `len(Data) + 32`, a bound on its protobuf framing.
    - The message envelope (at most 121 bytes) is not counted.
 2. **One entry-size limit.** `raft.MaxEntryBytes` is 4 MiB + 32 KiB.

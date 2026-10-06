@@ -95,9 +95,17 @@ type pendingMembership struct {
 	voters []uint64
 	result chan proposalResult
 }
+
+// pendingRead is one read probe and every read waiting on it (D022).
 type pendingRead struct {
-	result chan readResult
-	acks   map[uint64]struct{}
+	results []chan readResult
+	acks    map[uint64]struct{}
+}
+
+func (read pendingRead) complete(result readResult) {
+	for _, waiter := range read.results {
+		waiter <- result
+	}
 }
 
 // Runtime serializes all access to a Raft Node in one event loop.
@@ -366,22 +374,26 @@ func (r *Runtime) run(tickInterval time.Duration) {
 		case statusEvent:
 			event.result <- r.node.Status()
 		case readEvent:
+			var reads []readEvent
+			reads, deferred = r.collectReads(event, deferred)
+			read := pendingRead{acks: map[uint64]struct{}{r.node.Status().ID: {}}}
+			for _, queued := range reads {
+				read.results = append(read.results, queued.result)
+			}
 			nextReadContext++
 			contextID := nextReadContext
 			update, err := r.node.ReadProbe(contextID)
 			if err != nil {
-				event.result <- readResult{err: err}
+				read.complete(readResult{err: err})
 				continue
 			}
-			pendingReads[contextID] = pendingRead{
-				result: event.result, acks: map[uint64]struct{}{r.node.Status().ID: {}},
-			}
+			pendingReads[contextID] = read
 			if err := r.processUpdate(update, pending, pendingReads); err != nil {
 				r.fail(err, pending, pendingReads)
 				return
 			}
-			if r.node.HasQuorum(map[uint64]struct{}{r.node.Status().ID: {}}) {
-				event.result <- readResult{index: r.node.Status().CommitIndex}
+			if r.node.HasQuorum(read.acks) {
+				read.complete(readResult{index: r.node.Status().CommitIndex})
 				delete(pendingReads, contextID)
 			}
 		case stopEvent:
@@ -455,6 +467,36 @@ func (r *Runtime) proposeBatch(batch []proposalEvent, pending map[uint64]pending
 		return nil
 	}
 	return r.processUpdate(update, pending, pendingReads)
+}
+
+// collectReads gathers the reads that share first's probe (D022): the reads
+// at the head of deferred when it is not empty, otherwise every read queued
+// now. Other events drained from the queue are returned in arrival order.
+func (r *Runtime) collectReads(first readEvent, deferred []any) ([]readEvent, []any) {
+	reads := []readEvent{first}
+	if len(deferred) > 0 {
+		for len(deferred) > 0 {
+			next, ok := deferred[0].(readEvent)
+			if !ok {
+				break
+			}
+			reads, deferred = append(reads, next), deferred[1:]
+		}
+		return reads, deferred
+	}
+	for drained := 0; drained < cap(r.events); drained++ {
+		select {
+		case raw := <-r.events:
+			if next, ok := raw.(readEvent); ok {
+				reads = append(reads, next)
+			} else {
+				deferred = append(deferred, raw)
+			}
+		default:
+			return reads, deferred
+		}
+	}
+	return reads, deferred
 }
 
 // drainAppends reads queued events without blocking and gathers appends from
@@ -647,7 +689,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 			delete(pending, index)
 		}
 		for contextID, read := range pendingReads {
-			read.result <- readResult{err: raft.ErrNotLeader}
+			read.complete(readResult{err: raft.ErrNotLeader})
 			delete(pendingReads, contextID)
 		}
 	}
@@ -698,7 +740,7 @@ func (r *Runtime) acknowledgeRead(message raft.Message, pendingReads map[uint64]
 	if r.machine.AppliedIndex() < index {
 		return
 	}
-	read.result <- readResult{index: index}
+	read.complete(readResult{index: index})
 	delete(pendingReads, message.Context)
 }
 
@@ -742,7 +784,7 @@ func (r *Runtime) fail(cause error, pending map[uint64]pendingProposal, pendingR
 		waiter.result <- proposalResult{index: index, err: cause}
 	}
 	for contextID, read := range pendingReads {
-		read.result <- readResult{err: cause}
+		read.complete(readResult{err: cause})
 		delete(pendingReads, contextID)
 	}
 	_ = r.closeResources()

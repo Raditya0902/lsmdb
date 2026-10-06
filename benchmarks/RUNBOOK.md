@@ -193,6 +193,11 @@ To print the summary again later:
 go run scripts/bench_compare.go summarize benchmarks/results/<file>-compare.json
 ```
 
+Verdicts compare every arm against the first declared arm. To compare against
+another arm, pass it with `-ref`, before the file:
+`summarize -ref <arm> <file>`. The same range rule and the same 5-valid-run
+requirement apply, and the summary header names the reference arm.
+
 ### 3c. Failover
 
 After each run's throughput window, the tool:

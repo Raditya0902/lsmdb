@@ -416,7 +416,7 @@ func TestSummaryLeadsWithAppendsPerEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(text.String(), "\n")
-	header, verdictLine := lines[1], lines[len(lines)-2]
+	header, verdictLine := lines[tableHeader(t, lines)], lines[len(lines)-2]
 	if a, o := strings.Index(header, "appends/entry"), strings.Index(header, "ops/s"); a < 0 || o < 0 || a > o {
 		t.Errorf("header does not lead with appends/entry: %q", header)
 	}
@@ -454,10 +454,11 @@ func TestSummaryShowsSendFailuresOnlyWhereRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(text.String(), "\n")
-	if !strings.Contains(lines[1], "deadline fails/run") || !strings.Contains(lines[1], "other fails/run") {
-		t.Fatalf("header lacks send failure columns: %q", lines[1])
+	h := tableHeader(t, lines)
+	if !strings.Contains(lines[h], "deadline fails/run") || !strings.Contains(lines[h], "other fails/run") {
+		t.Fatalf("header lacks send failure columns: %q", lines[h])
 	}
-	baseFields, fixFields := strings.Fields(lines[2]), strings.Fields(lines[3])
+	baseFields, fixFields := strings.Fields(lines[h+1]), strings.Fields(lines[h+2])
 	if got := baseFields[len(baseFields)-2:]; got[0] != "-" || got[1] != "-" {
 		t.Errorf("base row send failures = %v, want - - when unrecorded: %q", got, lines[2])
 	}
@@ -524,4 +525,17 @@ func TestSlotArgsForwardLabelsOnlyToArmsThatAcceptThem(t *testing.T) {
 	if err := ValidateExtraArgs([]string{"-machine-type=x"}); err == nil {
 		t.Error("labels passed after -- must still be rejected; the driver owns them")
 	}
+}
+
+// tableHeader returns the index of the summary table's header line, which
+// follows the label and reference-arm lines.
+func tableHeader(t *testing.T, lines []string) int {
+	t.Helper()
+	for i, line := range lines {
+		if strings.HasPrefix(line, "clients ") {
+			return i
+		}
+	}
+	t.Fatalf("no table header in summary:\n%s", strings.Join(lines, "\n"))
+	return 0
 }

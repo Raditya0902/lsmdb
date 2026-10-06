@@ -7,7 +7,7 @@
 //	    -arm base=bd67696+<item1>,<item2> -arm tip=HEAD \
 //	    -clients 1,2,4,8,16 -repetitions 5 -machine-type <type> -disk-type <type> \
 //	    -- -official -warmup 5s -duration 30s
-//	go run scripts/bench_compare.go summarize <combined.json>
+//	go run scripts/bench_compare.go summarize [-ref arm] <combined.json>
 //
 // Each arm is built in its own detached git worktree from committed revisions
 // only; uncommitted changes in the main checkout are never included. A
@@ -60,7 +60,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: go run scripts/bench_compare.go run -arm name=rev[+pick,...] ... [-clients 1,4] [-repetitions 5] [-out file] [-work dir] [-machine-type t -disk-type t] [-- clusterbench flags]")
-	fmt.Fprintln(os.Stderr, "       go run scripts/bench_compare.go summarize <combined.json>")
+	fmt.Fprintln(os.Stderr, "       go run scripts/bench_compare.go summarize [-ref arm] <combined.json>")
 	os.Exit(2)
 }
 
@@ -277,18 +277,24 @@ func runSlot(ctx context.Context, opts runOptions, slot benchcompare.Slot, bin, 
 }
 
 func summarizeCommand(args []string) error {
-	if len(args) != 1 {
+	flags := flag.NewFlagSet("summarize", flag.ContinueOnError)
+	reference := flags.String("ref", "", "arm every other arm is compared against; default the first declared arm")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
 		usage()
 	}
-	data, err := os.ReadFile(args[0])
+	path := flags.Arg(0)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	var combined benchcompare.Combined
 	if err := json.Unmarshal(data, &combined); err != nil {
-		return fmt.Errorf("%s: %w", args[0], err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
-	summary, err := benchcompare.Summarize(combined)
+	summary, err := benchcompare.SummarizeAgainst(combined, *reference)
 	if err != nil {
 		return err
 	}

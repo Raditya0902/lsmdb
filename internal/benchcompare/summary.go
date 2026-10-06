@@ -62,7 +62,7 @@ type Cell struct {
 // distributions give disjoint ranges by chance 2/C(10,5), about 0.8% of the time.
 const MinValidRuns = 5
 
-// Comparison sets one arm against the first (baseline) arm at one client count.
+// Comparison sets one arm against the reference arm (Base) at one client count.
 // When either arm has fewer than MinValidRuns valid runs, InsufficientRuns is
 // set and neither meaningful flag is.
 type Comparison struct {
@@ -83,6 +83,7 @@ type Comparison struct {
 type Summary struct {
 	Label       string       `json:"label"`
 	Complete    bool         `json:"complete"`
+	Reference   string       `json:"reference"`
 	Cells       []Cell       `json:"cells"`
 	Comparisons []Comparison `json:"comparisons"`
 }
@@ -125,9 +126,21 @@ type cellValues struct {
 // Summarize groups runs by arm and client count, excluding invalid runs from
 // every statistic, and compares each arm against the first declared arm.
 func Summarize(combined Combined) (Summary, error) {
+	return SummarizeAgainst(combined, "")
+}
+
+// SummarizeAgainst is Summarize with every other arm compared against the
+// named reference arm; an empty name means the first declared arm.
+func SummarizeAgainst(combined Combined, reference string) (Summary, error) {
 	order := make(map[string]int, len(combined.Arms))
 	for i, arm := range combined.Arms {
 		order[arm.Name] = i
+	}
+	if reference == "" && len(combined.Arms) > 0 {
+		reference = combined.Arms[0].Name
+	}
+	if _, ok := order[reference]; !ok && len(combined.Arms) > 0 {
+		return Summary{}, fmt.Errorf("reference arm %q is not a declared arm", reference)
 	}
 	values := map[cellKey]*cellValues{}
 	official := len(combined.Runs) > 0
@@ -146,7 +159,7 @@ func Summarize(combined Combined) (Summary, error) {
 		}
 		values[key].add(view.run)
 	}
-	summary := Summary{Label: "secondary", Complete: combined.Complete}
+	summary := Summary{Label: "secondary", Complete: combined.Complete, Reference: reference}
 	if official {
 		summary.Label = "official"
 	}
@@ -160,7 +173,7 @@ func Summarize(combined Combined) (Summary, error) {
 		}
 		return order[a.Arm] < order[b.Arm]
 	})
-	summary.Comparisons = compare(summary.Cells, combined.Arms)
+	summary.Comparisons = compare(summary.Cells, combined.Arms, reference)
 	return summary, nil
 }
 
@@ -212,11 +225,10 @@ func (v *cellValues) cell(key cellKey) Cell {
 	}
 }
 
-func compare(cells []Cell, arms []ArmBuild) []Comparison {
+func compare(cells []Cell, arms []ArmBuild, base string) []Comparison {
 	if len(arms) < 2 {
 		return nil
 	}
-	base := arms[0].Name
 	byKey := make(map[cellKey]Cell, len(cells))
 	var clients []int
 	for _, cell := range cells {
@@ -228,7 +240,10 @@ func compare(cells []Cell, arms []ArmBuild) []Comparison {
 	var out []Comparison
 	for _, count := range clients {
 		b := byKey[cellKey{base, count}]
-		for _, arm := range arms[1:] {
+		for _, arm := range arms {
+			if arm.Name == base {
+				continue
+			}
 			o := byKey[cellKey{arm.Name, count}]
 			cmp := Comparison{
 				Clients: count, Base: base, Other: arm.Name,
@@ -252,7 +267,7 @@ func compare(cells []Cell, arms []ArmBuild) []Comparison {
 
 // WriteSummary prints the summary as aligned text.
 func WriteSummary(w io.Writer, summary Summary) error {
-	if _, err := fmt.Fprintf(w, "label: %s\n", summary.Label); err != nil {
+	if _, err := fmt.Fprintf(w, "label: %s\nreference arm: %s\n", summary.Label, summary.Reference); err != nil {
 		return err
 	}
 	if !summary.Complete {

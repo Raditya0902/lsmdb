@@ -1,0 +1,32 @@
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:135: 0 of 24 writes failed; 0 elections
+--- PASS: TestLargeValueWritesKeepOneLeader (2.80s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:135: 0 of 24 writes failed; 0 elections
+--- PASS: TestLargeValueWritesKeepOneLeader (2.47s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:135: 0 of 24 writes failed; 0 elections
+--- PASS: TestLargeValueWritesKeepOneLeader (2.38s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:135: 0 of 24 writes failed; 0 elections
+--- PASS: TestLargeValueWritesKeepOneLeader (2.51s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 2: role follower, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:131: node 3: role leader, term 1 -> 1, commit 25, last index 25
+    large_value_test.go:135: 0 of 24 writes failed; 0 elections
+--- PASS: TestLargeValueWritesKeepOneLeader (2.46s)
+PASS
+ok  	lsmdb/cluster	12.716s

@@ -1,0 +1,30 @@
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 16, commit 39, last index 39
+    large_value_test.go:131: node 2: role leader, term 1 -> 16, commit 39, last index 39
+    large_value_test.go:131: node 3: role follower, term 1 -> 16, commit 39, last index 39
+    large_value_test.go:135: 0 of 24 writes failed; 15 elections
+    large_value_test.go:140: 15 elections during the large-value writes, want 0
+--- FAIL: TestLargeValueWritesKeepOneLeader (12.96s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:128: status of node 3: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (13.77s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role follower, term 1 -> 18, commit 42, last index 42
+    large_value_test.go:131: node 2: role leader, term 1 -> 18, commit 42, last index 42
+    large_value_test.go:131: node 3: role follower, term 1 -> 18, commit 42, last index 42
+    large_value_test.go:135: 0 of 24 writes failed; 17 elections
+    large_value_test.go:140: 17 elections during the large-value writes, want 0
+--- FAIL: TestLargeValueWritesKeepOneLeader (10.80s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:131: node 1: role leader, term 1 -> 20, commit 44, last index 44
+    large_value_test.go:131: node 2: role follower, term 1 -> 20, commit 44, last index 44
+    large_value_test.go:131: node 3: role follower, term 1 -> 20, commit 44, last index 44
+    large_value_test.go:135: 0 of 24 writes failed; 19 elections
+    large_value_test.go:140: 19 elections during the large-value writes, want 0
+--- FAIL: TestLargeValueWritesKeepOneLeader (11.60s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:125: status of node 1: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (12.36s)
+FAIL
+FAIL	lsmdb/cluster	61.594s
+FAIL

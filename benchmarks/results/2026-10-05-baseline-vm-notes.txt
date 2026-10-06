@@ -1,0 +1,105 @@
+# lsmdb phase-10 VM smoke + sweep, notes
+date -u: 2026-10-05T19:49:57Z
+machine-type: e2-standard-4 (GCE, us-central1-a)
+disk-type: pd-ssd 100GB boot disk (network)
+caveat: e2 is not shared-core, but e2 performance can vary from run to run; not suitable for official numbers
+caveat: pd-ssd is network storage; fsync latency dominates cluster numbers
+
+== uname -a
+Linux <vm-hostname> 7.0.0-1011-gcp #11~24.04.1-Ubuntu SMP PREEMPT Tue Aug 11 20:14:48 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+== go version
+go version go1.26.1 linux/amd64
+
+== git
+8f07b48155aa738a5f35b1fa09fb5cbd54d2a10d
+
+nproc: 4  nproc --all: 4
+cpu.max: max 100000
+cgroup: <redacted>
+scaling_governor: no cpufreq
+
+== lscpu
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           46 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               GenuineIntel
+Model name:                              Intel(R) Xeon(R) CPU @ 2.20GHz
+CPU family:                              6
+Model:                                   79
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                0
+BogoMIPS:                                4400.28
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch pti ssbd ibrs ibpb stibp fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm rdseed adx smap xsaveopt arat md_clear arch_capabilities
+Hypervisor vendor:                       KVM
+Virtualization type:                     full
+L1d cache:                               64 KiB (2 instances)
+L1i cache:                               64 KiB (2 instances)
+L2 cache:                                512 KiB (2 instances)
+L3 cache:                                55 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Mitigation; Aligned branch/return thunks
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Mitigation; PTE Inversion
+Vulnerability Mds:                       Mitigation; Clear CPU buffers; SMT Host state unknown
+Vulnerability Meltdown:                  Mitigation; PTI
+Vulnerability Mmio stale data:           Vulnerable: Clear CPU buffers attempted, no microcode; SMT Host state unknown
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Mitigation; IBRS
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; IBRS; IBPB conditional; STIBP conditional; RSB filling; PBRSB-eIBRS Not affected; BHI SW loop, KVM SW loop
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Mitigation; Clear CPU buffers; SMT Host state unknown
+Vulnerability Vmscape:                   Not affected
+
+== free -h
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       715Mi        13Gi       988Ki       1.8Gi        14Gi
+Swap:             0B          0B          0B
+
+== df -T /mnt/bench
+Filesystem     Type 1K-blocks    Used Available Use% Mounted on
+/dev/root      ext4 100476656 3714264  96746008   4% /
+
+== findmnt -T /mnt/bench
+SOURCE    FSTYPE OPTIONS
+/dev/sda1 ext4   rw,relatime,discard,errors=remount-ro,commit=30
+
+== lsblk -d -o NAME,ROTA,TYPE,MODEL,SIZE
+NAME  ROTA TYPE MODEL            SIZE
+loop0    0 loop                 66.8M
+loop1    0 loop                348.2M
+loop2    0 loop                 50.3M
+sda      0 disk PersistentDisk   100G
+
+== uptime
+ 19:49:57 up 4 min,  1 user,  load average: 2.00, 1.35, 0.57
+
+== top -bn1 | head -15
+top - 19:49:57 up 4 min,  1 user,  load average: 2.00, 1.35, 0.57
+Tasks: 138 total,   1 running, 137 sleeping,   0 stopped,   0 zombie
+%Cpu(s):  0.0 us,  0.0 sy,  0.0 ni, 97.7 id,  0.0 wa,  0.0 hi,  2.3 si,  0.0 st 
+MiB Mem :  15985.6 total,  13789.8 free,    707.0 used,   1806.3 buff/cache     
+MiB Swap:      0.0 total,      0.0 free,      0.0 used.  15278.6 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   8870 <user>  20   0   12380   5580   3440 R  10.0   0.0   0:00.01 top
+      1 root      20   0   22788  13928   9604 S   0.0   0.1   0:03.19 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:00.00 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      5 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      6 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      7 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+

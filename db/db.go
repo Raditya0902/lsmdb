@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"lsmdb/internal/compact"
 	"lsmdb/internal/manifest"
@@ -52,6 +54,13 @@ type DB struct {
 	appliedIndex uint64
 	durableIndex uint64
 	closed       bool
+
+	// Counted after each flush or compaction is published; read by Stats
+	// without db.mu.
+	flushes         atomic.Uint64
+	flushNanos      atomic.Int64
+	compactions     atomic.Uint64
+	compactionNanos atomic.Int64
 }
 
 // Open creates or opens a database at path.
@@ -62,47 +71,66 @@ func Open(path string, opts *Options) (*DB, error) {
 	if opts == nil {
 		opts = DefaultOptions()
 	}
-	mem := memtable.New()
 	if path == "" {
 		if opts.DurabilityMode == DurabilityReplica {
 			return nil, fmt.Errorf("replica durability requires a persistent path")
 		}
-		return &DB{mem: mem, opts: opts}, nil
+		return &DB{mem: memtable.New(), opts: opts}, nil
 	}
 
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 
-	readers, manifestState, err := openSSTables(path)
+	readers, manifestState, bootstrapped, err := openSSTables(path)
 	if err != nil {
 		return nil, err
 	}
 	if opts.DurabilityMode == DurabilityReplica {
+		if bootstrapped {
+			if err := manifest.Store(path, manifestState); err != nil {
+				closeReaders(readers)
+				return nil, fmt.Errorf("bootstrap manifest: %w", err)
+			}
+		}
 		return &DB{
-			mem: mem, path: path, readers: readers, nextSST: manifestState.NextSST,
+			mem: memtable.New(), path: path, readers: readers, nextSST: manifestState.NextSST,
 			opts: opts, manifest: manifestState, appliedIndex: manifestState.AppliedIndex,
 			durableIndex: manifestState.AppliedIndex,
 		}, nil
 	}
 
+	// Legacy manifests do not record LastSeq, so derive it from the live SSTables.
+	legacy := bootstrapped || manifestState.Legacy()
+	lastSeq := manifestState.LastSeq
+	if legacy {
+		if lastSeq, err = maxSequence(readers); err != nil {
+			closeReaders(readers)
+			return nil, err
+		}
+	}
+	return openEmbedded(path, opts, readers, manifestState, lastSeq, legacy)
+}
+
+// openEmbedded replays the WAL above lastSeq and, for a legacy database,
+// publishes a manifest that records lastSeq before returning.
+func openEmbedded(path string, opts *Options, readers []*sstable.Reader, manifestState manifest.State, lastSeq uint64, legacy bool) (*DB, error) {
 	w, err := wal.Open(filepath.Join(path, "wal"))
 	if err != nil {
-		for _, r := range readers {
-			r.Close() //nolint:errcheck
-		}
+		closeReaders(readers)
 		return nil, fmt.Errorf("open wal: %w", err)
 	}
 
-	records, err := w.ReadAll()
+	replayed, err := w.ReadAll()
 	if err != nil {
 		w.Close() //nolint:errcheck
-		for _, r := range readers {
-			r.Close() //nolint:errcheck
-		}
+		closeReaders(readers)
 		return nil, fmt.Errorf("replay wal: %w", err)
 	}
+	records, renumbered := sequenceWAL(replayed, lastSeq, legacy)
 
+	// Every new sequence number must exceed every published one.
+	mem := memtable.NewWithSeq(lastSeq + 1)
 	for _, r := range records {
 		// WAL types (1=PUT, 2=DELETE) map to memtable RecordType (0=PUT, 1=DELETE).
 		mem.SetRaw(memtable.Record{
@@ -113,7 +141,7 @@ func Open(path string, opts *Options) (*DB, error) {
 		})
 	}
 
-	return &DB{
+	db := &DB{
 		mem:      mem,
 		log:      w,
 		path:     path,
@@ -121,7 +149,63 @@ func Open(path string, opts *Options) (*DB, error) {
 		nextSST:  manifestState.NextSST,
 		opts:     opts,
 		manifest: manifestState,
-	}, nil
+	}
+	if legacy {
+		if err := db.publishSequenceUpgrade(lastSeq, renumbered); err != nil {
+			db.Close() //nolint:errcheck
+			return nil, fmt.Errorf("upgrade manifest sequence: %w", err)
+		}
+	}
+	return db, nil
+}
+
+// sequenceWAL prepares replayed WAL records for the memtable. Records at or
+// below lastSeq are already in published SSTables (the WAL truncate after a
+// flush is not synced) and are dropped. A legacy database records no lastSeq;
+// if its WAL holds records at or below the highest SSTable sequence, they were
+// written while sequence numbers restarted on reopen, so every record is
+// renumbered above both ranges in WAL order, which is the write order.
+func sequenceWAL(records []wal.Record, lastSeq uint64, legacy bool) ([]wal.Record, bool) {
+	if !legacy {
+		kept := make([]wal.Record, 0, len(records))
+		for _, r := range records {
+			if r.SeqNum > lastSeq {
+				kept = append(kept, r)
+			}
+		}
+		return kept, false
+	}
+	base, reused := lastSeq, false
+	for _, r := range records {
+		base = max(base, r.SeqNum)
+		reused = reused || r.SeqNum <= lastSeq
+	}
+	if !reused {
+		return records, false
+	}
+	renumbered := make([]wal.Record, len(records))
+	for i, r := range records {
+		r.SeqNum = base + uint64(i) + 1
+		renumbered[i] = r
+	}
+	return renumbered, true
+}
+
+// publishSequenceUpgrade records lastSeq for a database opened from a legacy
+// manifest. Renumbered WAL records are flushed first, so the published LastSeq
+// covers them before the WAL that still holds their old numbers is reset.
+func (db *DB) publishSequenceUpgrade(lastSeq uint64, renumbered bool) error {
+	state := db.manifest
+	state.LastSeq = lastSeq
+	if renumbered {
+		db.manifest = state
+		return db.flush()
+	}
+	if err := manifest.Store(db.path, state); err != nil {
+		return err
+	}
+	db.manifest = state
+	return nil
 }
 
 // Get returns the value stored under key.
@@ -461,6 +545,23 @@ func (db *DB) Close() error {
 
 // ── internal write path ────────────────────────────────────────────────────
 
+// Named flush steps at which package tests can simulate a crash.
+const (
+	stepFlushBeforeManifest = "flush: SSTable written, manifest not published"
+	stepFlushAfterManifest  = "flush: manifest published, WAL not reset"
+)
+
+// crashPoint is nil outside tests. When set, a flush stops with its error at the
+// named step, leaving files exactly as a crash at that point would.
+var crashPoint func(step string) error
+
+func reachStep(step string) error {
+	if crashPoint == nil {
+		return nil
+	}
+	return crashPoint(step)
+}
+
 // maybeFlush flushes the memtable if the flush threshold is reached.
 // Must be called with db.mu held.
 func (db *DB) maybeFlush() error {
@@ -493,6 +594,7 @@ func (db *DB) flush() error {
 	if db.path == "" {
 		return nil
 	}
+	start := time.Now()
 
 	db.nextSST++
 	sstName := fmt.Sprintf("%06d.sst", db.nextSST)
@@ -515,6 +617,11 @@ func (db *DB) flush() error {
 	state.NextSST = db.nextSST
 	if db.opts.DurabilityMode == DurabilityReplica {
 		state.AppliedIndex = db.appliedIndex
+	} else {
+		state.LastSeq = max(state.LastSeq, db.mem.NextSeq()-1)
+	}
+	if err := reachStep(stepFlushBeforeManifest); err != nil {
+		return err
 	}
 	if err := manifest.Store(db.path, state); err != nil {
 		_ = r.Close()
@@ -529,12 +636,18 @@ func (db *DB) flush() error {
 	if db.opts.DurabilityMode == DurabilityReplica {
 		db.durableIndex = db.appliedIndex
 	}
+	if err := reachStep(stepFlushAfterManifest); err != nil {
+		return err
+	}
 
 	if db.log != nil {
 		if err := db.log.Reset(); err != nil {
 			return fmt.Errorf("rotate wal: %w", err)
 		}
 	}
+	// Counted before the nested compaction, so flush time excludes it.
+	db.flushes.Add(1)
+	db.flushNanos.Add(int64(time.Since(start)))
 
 	return db.maybeCompact()
 }
@@ -556,6 +669,7 @@ func (db *DB) compact() error {
 	if len(db.readers) == 0 {
 		return nil
 	}
+	start := time.Now()
 
 	db.nextSST++
 	outPath := filepath.Join(db.path, fmt.Sprintf("%06d.sst", db.nextSST))
@@ -613,6 +727,8 @@ func (db *DB) compact() error {
 
 	db.readers = newReaders
 	db.manifest = state
+	db.compactions.Add(1)
+	db.compactionNanos.Add(int64(time.Since(start)))
 
 	log.Printf("[compact] %d files, %d records in → %d records out (%s)",
 		filesIn, recordsIn, recordsOut, filepath.Base(outPath))
@@ -622,17 +738,17 @@ func (db *DB) compact() error {
 
 // ── startup helpers ────────────────────────────────────────────────────────
 
-// openSSTables scans path for *.sst files, opens them newest-first, and returns
-// the reader slice plus the sequence number of the newest file found.
-func openSSTables(path string) ([]*sstable.Reader, manifest.State, error) {
+// openSSTables opens the manifest's SSTables newest-first. Without a manifest it
+// scans path for *.sst files and reports the unpublished state as bootstrapped.
+func openSSTables(path string) ([]*sstable.Reader, manifest.State, bool, error) {
 	state, ok, err := manifest.Load(path)
 	if err != nil {
-		return nil, manifest.State{}, err
+		return nil, manifest.State{}, false, err
 	}
 	if !ok {
 		entries, err := os.ReadDir(path)
 		if err != nil {
-			return nil, manifest.State{}, fmt.Errorf("read db dir: %w", err)
+			return nil, manifest.State{}, false, fmt.Errorf("read db dir: %w", err)
 		}
 		var names []string
 		for _, e := range entries {
@@ -646,9 +762,6 @@ func openSSTables(path string) ([]*sstable.Reader, manifest.State, error) {
 		if len(names) > 0 {
 			_, _ = fmt.Sscanf(names[len(names)-1], "%d.sst", &state.NextSST)
 		}
-		if err := manifest.Store(path, state); err != nil {
-			return nil, manifest.State{}, fmt.Errorf("bootstrap manifest: %w", err)
-		}
 	}
 	names := state.SSTables
 
@@ -656,13 +769,36 @@ func openSSTables(path string) ([]*sstable.Reader, manifest.State, error) {
 	for i := len(names) - 1; i >= 0; i-- {
 		r, err := sstable.Open(filepath.Join(path, names[i]))
 		if err != nil {
-			for _, opened := range readers {
-				opened.Close() //nolint:errcheck
-			}
-			return nil, manifest.State{}, fmt.Errorf("open sstable %s: %w", names[i], err)
+			closeReaders(readers)
+			return nil, manifest.State{}, false, fmt.Errorf("open sstable %s: %w", names[i], err)
 		}
 		readers = append(readers, r)
 	}
 
-	return readers, state, nil
+	return readers, state, !ok, nil
+}
+
+// maxSequence returns the highest sequence number stored in readers.
+func maxSequence(readers []*sstable.Reader) (uint64, error) {
+	var highest uint64
+	for _, reader := range readers {
+		records := reader.Iterator()
+		for {
+			record, ok, err := records.Next()
+			if err != nil {
+				return 0, fmt.Errorf("read sequence from %s: %w", reader.Path(), err)
+			}
+			if !ok {
+				break
+			}
+			highest = max(highest, record.SeqNum)
+		}
+	}
+	return highest, nil
+}
+
+func closeReaders(readers []*sstable.Reader) {
+	for _, r := range readers {
+		r.Close() //nolint:errcheck
+	}
 }

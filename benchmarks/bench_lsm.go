@@ -50,65 +50,43 @@ func openLSM(dir string) (*lsmDB, error) {
 	return &lsmDB{DB: d, dir: dir}, nil
 }
 
-// RunLSM executes all workloads against the LSM engine.
+// lsmWorkload returns per-op latencies and the wall time of its timed section.
+type lsmWorkload func(*lsmDB) ([]time.Duration, time.Duration, error)
+
+// RunLSM executes all workloads against the LSM engine, each on a fresh database.
 func RunLSM(dir string) ([]WorkloadResult, error) {
-	results := make([]WorkloadResult, 0, 9)
-
-	wl, err := runLSMWorkload(dir, "A: Sequential Writes", workloadALSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload A: %w", err)
+	type named struct {
+		name string
+		fn   lsmWorkload
 	}
-	results = append(results, wl)
-
-	wl, err = runLSMWorkload(dir, "B: Random Writes", workloadBLSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload B: %w", err)
+	workloads := []named{
+		{"A: Sequential Writes", workloadALSM},
+		{"B: Random Writes", workloadBLSM},
+		{"C: Read-after-Write", workloadCLSM},
+		{"D: Point Lookups", workloadDLSM},
+		{"E: Update-Heavy", workloadELSM},
+		{"F: Delete-Heavy", workloadFLSM},
 	}
-	results = append(results, wl)
-
-	wl, err = runLSMWorkload(dir, "C: Read-after-Write", workloadCLSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload C: %w", err)
-	}
-	results = append(results, wl)
-
-	wl, err = runLSMWorkload(dir, "D: Point Lookups", workloadDLSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload D: %w", err)
-	}
-	results = append(results, wl)
-
-	wl, err = runLSMWorkload(dir, "E: Update-Heavy", workloadELSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload E: %w", err)
-	}
-	results = append(results, wl)
-
-	wl, err = runLSMWorkload(dir, "F: Delete-Heavy", workloadFLSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload F: %w", err)
-	}
-	results = append(results, wl)
-
 	for _, n := range []int{8, 16, 32} {
-		name := fmt.Sprintf("G(%d): Concurrent Reads", n)
-		wl, err = runLSMWorkloadG(dir, name, n)
+		goroutines := n
+		workloads = append(workloads, named{fmt.Sprintf("G(%d): Concurrent Reads", n), func(d *lsmDB) ([]time.Duration, time.Duration, error) {
+			return workloadGLSM(d, goroutines)
+		}})
+	}
+	workloads = append(workloads, named{"H: Range Scans", workloadHLSM})
+
+	results := make([]WorkloadResult, 0, len(workloads))
+	for _, w := range workloads {
+		wl, err := runLSMWorkload(dir, w.name, w.fn)
 		if err != nil {
-			return nil, fmt.Errorf("workload %s: %w", name, err)
+			return nil, fmt.Errorf("workload %s: %w", w.name, err)
 		}
 		results = append(results, wl)
 	}
-
-	wl, err = runLSMWorkload(dir, "H: Range Scans", workloadHLSM)
-	if err != nil {
-		return nil, fmt.Errorf("workload H: %w", err)
-	}
-	results = append(results, wl)
-
 	return results, nil
 }
 
-func runLSMWorkload(baseDir, name string, fn func(*lsmDB) ([]time.Duration, error)) (WorkloadResult, error) {
+func runLSMWorkload(baseDir, name string, fn lsmWorkload) (WorkloadResult, error) {
 	dir := filepath.Join(baseDir, "lsm")
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -120,7 +98,7 @@ func runLSMWorkload(baseDir, name string, fn func(*lsmDB) ([]time.Duration, erro
 		return WorkloadResult{}, err
 	}
 
-	latencies, err := fn(d)
+	latencies, wall, err := fn(d)
 	if err != nil {
 		d.Close() //nolint:errcheck
 		return WorkloadResult{}, err
@@ -132,121 +110,59 @@ func runLSMWorkload(baseDir, name string, fn func(*lsmDB) ([]time.Duration, erro
 		return WorkloadResult{}, err
 	}
 
-	disk := diskUsage(dir)
-	p50, p95, p99 := latencyStats(latencies)
-	n := len(latencies)
-
-	var totalDur time.Duration
-	for _, l := range latencies {
-		totalDur += l
-	}
-	opsPerSec := float64(n) / totalDur.Seconds()
-
-	var readAmp float64
+	result := resultFor(name, lsmEngine, latencies, wall)
+	result.DiskBytes = diskUsage(dir)
+	result.BloomSkips = bloomSkips
 	if sstCount > 0 {
-		readAmp = float64(sstCount)
+		result.ReadAmp = float64(sstCount)
 	}
-
-	return WorkloadResult{
-		Workload:   name,
-		Engine:     lsmEngine,
-		OpsPerSec:  opsPerSec,
-		P50Ms:      p50,
-		P95Ms:      p95,
-		P99Ms:      p99,
-		DiskBytes:  disk,
-		BloomSkips: bloomSkips,
-		ReadAmp:    readAmp,
-	}, nil
-}
-
-func runLSMWorkloadG(baseDir, name string, goroutines int) (WorkloadResult, error) {
-	dir := filepath.Join(baseDir, "lsm")
-	os.RemoveAll(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return WorkloadResult{}, err
-	}
-
-	d, err := openLSM(dir)
-	if err != nil {
-		return WorkloadResult{}, err
-	}
-
-	latencies, wallTime, err := workloadGLSM(d, goroutines)
-	if err != nil {
-		d.Close() //nolint:errcheck
-		return WorkloadResult{}, err
-	}
-
-	bloomSkips := d.BloomSkips()
-	sstCount := d.SSTableCount()
-	if err := d.Close(); err != nil {
-		return WorkloadResult{}, err
-	}
-
-	disk := diskUsage(dir)
-	p50, p95, p99 := latencyStats(latencies)
-	opsPerSec := float64(len(latencies)) / wallTime.Seconds()
-
-	var readAmp float64
-	if sstCount > 0 {
-		readAmp = float64(sstCount)
-	}
-
-	return WorkloadResult{
-		Workload:   name,
-		Engine:     lsmEngine,
-		OpsPerSec:  opsPerSec,
-		P50Ms:      p50,
-		P95Ms:      p95,
-		P99Ms:      p99,
-		DiskBytes:  disk,
-		BloomSkips: bloomSkips,
-		ReadAmp:    readAmp,
-	}, nil
+	return result, nil
 }
 
 // ── Workload implementations ──────────────────────────────────────────────
 
 // A: 10,000 sequential writes.
-func workloadALSM(d *lsmDB) ([]time.Duration, error) {
+func workloadALSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	keys := SequentialKeys(10_000)
 	vals := RandomValues(10_000, 1, 64)
 	latencies := make([]time.Duration, len(keys))
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		if err := d.Set(string(k), vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // B: 10,000 random writes.
-func workloadBLSM(d *lsmDB) ([]time.Duration, error) {
+func workloadBLSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	keys := RandomKeys(10_000, 2)
 	vals := RandomValues(10_000, 2, 64)
 	latencies := make([]time.Duration, len(keys))
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		if err := d.Set(string(k), vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // C: 5,000 read-after-write pairs.
-func workloadCLSM(d *lsmDB) ([]time.Duration, error) {
+func workloadCLSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	keys := SequentialKeys(5_000)
 	vals := RandomValues(5_000, 3, 64)
 	latencies := make([]time.Duration, 0, len(keys)*2)
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		if err := d.Set(string(k), vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies = append(latencies, time.Since(start))
 
@@ -254,21 +170,22 @@ func workloadCLSM(d *lsmDB) ([]time.Duration, error) {
 		d.Get(string(k))
 		latencies = append(latencies, time.Since(start))
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // D: 5,000 point lookups — 50% existing, 50% missing.
-func workloadDLSM(d *lsmDB) ([]time.Duration, error) {
+func workloadDLSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	const n = 5_000
 	keys := SequentialKeys(n)
 	vals := RandomValues(n, 4, 64)
 	for i, k := range keys {
 		if err := d.Set(string(k), vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	rng := rand.New(rand.NewSource(4))
 	latencies := make([]time.Duration, n)
+	timed := time.Now()
 	for i := 0; i < n; i++ {
 		var key string
 		if rng.Intn(2) == 0 {
@@ -280,17 +197,18 @@ func workloadDLSM(d *lsmDB) ([]time.Duration, error) {
 		d.Get(key)
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // E: 10 keys written 1,000 times each (update-heavy).
-func workloadELSM(d *lsmDB) ([]time.Duration, error) {
+func workloadELSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	const (
 		numKeys    = 10
 		iterations = 1_000
 	)
 	rng := rand.New(rand.NewSource(5))
 	latencies := make([]time.Duration, numKeys*iterations)
+	timed := time.Now()
 	idx := 0
 	for i := 0; i < iterations; i++ {
 		for j := 0; j < numKeys; j++ {
@@ -298,23 +216,23 @@ func workloadELSM(d *lsmDB) ([]time.Duration, error) {
 			val := fmt.Sprintf("val%08d", rng.Int63())
 			start := time.Now()
 			if err := d.Set(key, []byte(val)); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			latencies[idx] = time.Since(start)
 			idx++
 		}
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // F: write 5,000 keys, delete 2,500 random ones, read all 5,000.
-func workloadFLSM(d *lsmDB) ([]time.Duration, error) {
+func workloadFLSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	const n = 5_000
 	keys := SequentialKeys(n)
 	vals := RandomValues(n, 6, 64)
 	for i, k := range keys {
 		if err := d.Set(string(k), vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
@@ -322,21 +240,22 @@ func workloadFLSM(d *lsmDB) ([]time.Duration, error) {
 	perm := rng.Perm(n)
 	for _, idx := range perm[:n/2] {
 		if err := d.Delete(string(keys[idx])); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
 	latencies := make([]time.Duration, n)
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		d.Get(string(k))
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // H: 10,000 sequential keys pre-populated, 1,000 range scans of 100-key windows.
-func workloadHLSM(d *lsmDB) ([]time.Duration, error) {
+func workloadHLSM(d *lsmDB) ([]time.Duration, time.Duration, error) {
 	const (
 		numKeys    = 10_000
 		numScans   = 1_000
@@ -346,33 +265,34 @@ func workloadHLSM(d *lsmDB) ([]time.Duration, error) {
 	vals := RandomValues(numKeys, 8, 64)
 	for i, k := range keys {
 		if err := d.Set(string(k), vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	if err := d.ForceFlush(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	rng := rand.New(rand.NewSource(8))
 	latencies := make([]time.Duration, numScans)
+	timed := time.Now()
 	for i := range latencies {
 		startIdx := rng.Intn(numKeys - windowSize)
 		from := string(keys[startIdx])
 		to := string(keys[startIdx+windowSize-1])
 		t := time.Now()
 		if _, err := d.Scan(from, to); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies[i] = time.Since(t)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // G: pre-populate 10,000 keys, flush+compact to SSTables, then run goroutines
 // concurrent random Gets. Returns per-op latencies and total wall time.
 func workloadGLSM(d *lsmDB, goroutines int) ([]time.Duration, time.Duration, error) {
 	const (
-		numKeys = 10_000
+		numKeys  = 10_000
 		getsPerG = 1_000
 	)
 

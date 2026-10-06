@@ -178,9 +178,11 @@ func StartNode(config NodeConfig) (*Node, error) {
 	}
 	transport := raftgrpc.NewWithResolver(resolver)
 	metrics := newNodeMetrics(config.ID)
+	metrics.registerEngineStats(machine.EngineStats)
 	observed := &observedTransport{inner: transport, metrics: metrics}
 	runtime, err := raftnode.Start(
-		raftnode.Config{TickInterval: config.TickInterval, SnapshotThreshold: config.SnapshotThreshold}, core, store, observed, machine,
+		raftnode.Config{TickInterval: config.TickInterval, SnapshotThreshold: config.SnapshotThreshold}, core,
+		&observedStore{inner: store, metrics: metrics}, observed, &observedMachine{inner: machine, metrics: metrics},
 	)
 	if err != nil {
 		_ = listener.Close()
@@ -195,8 +197,8 @@ func StartNode(config NodeConfig) (*Node, error) {
 		server: grpc.NewServer(
 			grpc.UnaryInterceptor(metrics.unaryInterceptor),
 			grpc.StreamInterceptor(metrics.streamInterceptor),
-			grpc.MaxRecvMsgSize(kvstate.MaxValueBytes+64*1024),
-			grpc.MaxSendMsgSize(kvstate.MaxValueBytes+64*1024),
+			grpc.MaxRecvMsgSize(serverMessageLimit),
+			grpc.MaxSendMsgSize(serverMessageLimit),
 		),
 		listener: listener,
 	}
@@ -212,6 +214,11 @@ func StartNode(config NodeConfig) (*Node, error) {
 	go func() { _ = node.server.Serve(listener) }()
 	return node, nil
 }
+
+// MetricSnapshot reads every metric in this node's registry, keyed as
+// name{label=value,...} without the node_id label; histograms appear as
+// name_sum and name_count.
+func (n *Node) MetricSnapshot() (map[string]float64, error) { return n.metrics.snapshot() }
 
 // Address returns the actual bound address, useful when configured with port zero.
 func (n *Node) Address() string { return n.listener.Addr().String() }
@@ -248,6 +255,10 @@ func (n *Node) Close() error {
 	return n.closeErr
 }
 
+// serverMessageLimit bounds every gRPC message a node receives or sends. The
+// largest Raft append, one entry of raft.MaxEntryBytes, must fit (D019).
+const serverMessageLimit = kvstate.MaxValueBytes + 64<<10
+
 type handler struct {
 	lsmdbv1.UnimplementedKVServer
 	lsmdbv1.UnimplementedRaftServer
@@ -281,17 +292,15 @@ func (h *handler) Delete(ctx context.Context, request *lsmdbv1.DeleteRequest) (*
 }
 
 func (h *handler) write(ctx context.Context, command []byte) (*lsmdbv1.WriteResponse, error) {
-	index, err := h.node.runtime.Propose(ctx, command)
+	// The term is the committed entry's own, so no status round trip through
+	// the event loop is needed (analysis report rank 14).
+	index, term, err := h.node.runtime.Propose(ctx, command)
 	if err != nil {
 		h.node.metrics.proposals.WithLabelValues("error").Inc()
 		return nil, h.node.rpcError(err)
 	}
 	h.node.metrics.proposals.WithLabelValues("committed").Inc()
-	current, err := h.node.runtime.Status(ctx)
-	if err != nil {
-		return nil, h.node.rpcError(err)
-	}
-	return &lsmdbv1.WriteResponse{Term: current.Term, LogIndex: index}, nil
+	return &lsmdbv1.WriteResponse{Term: term, LogIndex: index}, nil
 }
 
 func (n *Node) observeMetrics(ctx context.Context) {
@@ -447,6 +456,9 @@ func (n *Node) rpcError(err error) error {
 			return withDetail.Err()
 		}
 		return base.Err()
+	}
+	if errors.Is(err, raft.ErrEntryTooLarge) {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if errors.Is(err, raft.ErrReadNotReady) {
 		return status.Error(codes.Unavailable, err.Error())

@@ -1,0 +1,23 @@
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:128: status of node 1: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (34.89s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:124: write 21: context deadline exceeded
+    large_value_test.go:124: write 20: context deadline exceeded
+    large_value_test.go:128: status of node 1: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (38.01s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:124: write 23: context deadline exceeded
+    large_value_test.go:128: status of node 1: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (41.61s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:124: write 21: context deadline exceeded
+    large_value_test.go:128: status of node 1: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (42.13s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:124: write 21: context deadline exceeded
+    large_value_test.go:128: status of node 1: context deadline exceeded
+--- FAIL: TestLargeValueWritesKeepOneLeader (40.81s)
+FAIL
+FAIL	lsmdb/cluster	197.572s
+FAIL

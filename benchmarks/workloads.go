@@ -4,38 +4,44 @@ package benchmarks
 import (
 	"fmt"
 	"math/rand"
-	"sort"
 	"time"
+
+	"lsmdb/internal/benchenv"
 )
 
 // WorkloadResult holds timing and storage metrics for one workload run.
+// OpsPerSec is Ops divided by the wall time of the timed section only;
+// pre-population is excluded. Percentiles are nearest-rank over per-op latencies.
 type WorkloadResult struct {
-	Workload   string  `json:"workload"`
-	Engine     string  `json:"engine"`
-	OpsPerSec  float64 `json:"ops_per_sec"`
-	P50Ms      float64 `json:"p50_ms"`
-	P95Ms      float64 `json:"p95_ms"`
-	P99Ms      float64 `json:"p99_ms"`
-	DiskBytes  int64   `json:"disk_bytes"`
-	BloomSkips int64   `json:"bloom_skips,omitempty"`
-	ReadAmp    float64 `json:"read_amp,omitempty"`
+	Workload    string  `json:"workload"`
+	Engine      string  `json:"engine"`
+	Ops         int     `json:"ops"`
+	WallSeconds float64 `json:"wall_seconds"`
+	OpsPerSec   float64 `json:"ops_per_sec"`
+	P50Ms       float64 `json:"p50_ms"`
+	P95Ms       float64 `json:"p95_ms"`
+	P99Ms       float64 `json:"p99_ms"`
+	P999Ms      float64 `json:"p99_9_ms"`
+	MaxMs       float64 `json:"max_ms"`
+	DiskBytes   int64   `json:"disk_bytes"`
+	BloomSkips  int64   `json:"bloom_skips,omitempty"`
+	ReadAmp     float64 `json:"read_amp,omitempty"`
 }
 
-// latencyStats computes P50/P95/P99 from an unsorted slice of durations.
-func latencyStats(latencies []time.Duration) (p50, p95, p99 float64) {
-	if len(latencies) == 0 {
-		return 0, 0, 0
+// resultFor computes throughput from the timed section's wall time and
+// latency percentiles from the per-op latencies.
+func resultFor(workload, engine string, latencies []time.Duration, wall time.Duration) WorkloadResult {
+	sorted := append([]time.Duration(nil), latencies...)
+	benchenv.SortDurations(sorted)
+	at := func(q float64) float64 { return benchenv.Milliseconds(benchenv.Percentile(sorted, q)) }
+	result := WorkloadResult{
+		Workload: workload, Engine: engine, Ops: len(latencies), WallSeconds: wall.Seconds(),
+		P50Ms: at(0.50), P95Ms: at(0.95), P99Ms: at(0.99), P999Ms: at(0.999), MaxMs: at(1.0),
 	}
-	cp := make([]time.Duration, len(latencies))
-	copy(cp, latencies)
-	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
-
-	idx := func(pct float64) time.Duration {
-		i := int(float64(len(cp)-1) * pct)
-		return cp[i]
+	if wall > 0 {
+		result.OpsPerSec = float64(len(latencies)) / wall.Seconds()
 	}
-	toMs := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1e6 }
-	return toMs(idx(0.50)), toMs(idx(0.95)), toMs(idx(0.99))
+	return result
 }
 
 // SequentialKeys returns n keys with a zero-padded numeric suffix.

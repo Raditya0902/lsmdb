@@ -1,0 +1,42 @@
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role leader, term 1 -> 21, commit 43, last index 43
+    large_value_test.go:190: node 2: role follower, term 1 -> 21, commit 43, last index 43
+    large_value_test.go:190: node 3: role follower, term 1 -> 21, commit 43, last index 43
+    large_value_test.go:196: 0 of 24 writes failed; 20 elections among the 3 of 3 nodes that answered
+    large_value_test.go:202: 20 elections during the large-value writes, want 0
+--- FAIL: TestLargeValueWritesKeepOneLeader (16.00s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: term 1 before the writes; status after: context deadline exceeded
+    large_value_test.go:190: node 2: term 1 before the writes; status after: context deadline exceeded
+    large_value_test.go:190: node 3: role leader, term 1 -> 21, commit 44, last index 44
+    large_value_test.go:196: 0 of 24 writes failed; 20 elections among the 1 of 3 nodes that answered
+    large_value_test.go:202: 20 elections during the large-value writes, want 0
+    large_value_test.go:205: 2 of 3 nodes did not report a status after settling
+--- FAIL: TestLargeValueWritesKeepOneLeader (20.63s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: term 1 before the writes; status after: context deadline exceeded
+    large_value_test.go:190: node 2: role leader, term 1 -> 22, commit 42, last index 42
+    large_value_test.go:190: node 3: term 1 before the writes; status after: context deadline exceeded
+    large_value_test.go:196: 0 of 24 writes failed; 21 elections among the 1 of 3 nodes that answered
+    large_value_test.go:202: 21 elections during the large-value writes, want 0
+    large_value_test.go:205: 2 of 3 nodes did not report a status after settling
+--- FAIL: TestLargeValueWritesKeepOneLeader (18.12s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: role pre-candidate, term 1 -> 13, commit 27, last index 28
+    large_value_test.go:190: node 2: role leader, term 1 -> 13, commit 37, last index 37
+    large_value_test.go:190: node 3: term 1 before the writes; status after: context deadline exceeded
+    large_value_test.go:196: 0 of 24 writes failed; 12 elections among the 2 of 3 nodes that answered
+    large_value_test.go:202: 12 elections during the large-value writes, want 0
+    large_value_test.go:205: 1 of 3 nodes did not report a status after settling
+--- FAIL: TestLargeValueWritesKeepOneLeader (15.54s)
+=== RUN   TestLargeValueWritesKeepOneLeader
+    large_value_test.go:190: node 1: term 1 before the writes; status after: context deadline exceeded
+    large_value_test.go:190: node 2: role pre-candidate, term 1 -> 24, commit 33, last index 34
+    large_value_test.go:190: node 3: role leader, term 1 -> 24, commit 51, last index 51
+    large_value_test.go:196: 0 of 24 writes failed; 23 elections among the 2 of 3 nodes that answered
+    large_value_test.go:202: 23 elections during the large-value writes, want 0
+    large_value_test.go:205: 1 of 3 nodes did not report a status after settling
+--- FAIL: TestLargeValueWritesKeepOneLeader (18.00s)
+FAIL
+FAIL	lsmdb/cluster	88.439s
+FAIL

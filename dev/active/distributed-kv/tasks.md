@@ -1,10 +1,21 @@
 # Distributed KV Cluster: Task Tracker
 
-Last updated: 2026-08-27
+Last updated: 2026-10-06
 
 ## Current Phase
 
-The v1.0.0 release is complete and verified.
+Phase 13 (Raft group commit, D022) is built and measured, on branch
+`phase-13-group-commit`, created from `d0e7c26`
+(`dev/active/phase-13-group-commit/`). The final arm is `a76f182`. The
+pre-registered VM comparison passed all of P1–P7 on 2026-10-06 (results in
+`a503f42`); D022 is measured. Follow-up work is under "After Phase 13".
+
+Phases 11, 10, 12a and 12b are complete on stacked branches:
+`phase-11-correctness-fixes`, then `phase-10-benchmark-harness-v2`, then
+`phase-12a-dup-ack-fix`, then `phase-12b-append-size-and-log-copy`. Phase 12b
+hardening (D020, `phase-12b-hardening`) and the vote lease (D021,
+`phase-12b-vote-lease`) are done, except hardening item 3, which is optional
+and not started. None is merged into `main` (`bd67696`) yet.
 
 ## Completed
 
@@ -66,7 +77,8 @@ The v1.0.0 release is complete and verified.
 
 ## In Progress
 
-None.
+- None. Phase 13 is built and measured; the stack (phase 11 to phase 13)
+  waits to be pushed and merged.
 
 ## Phase 1 — Crash-Safe LSM Seam
 
@@ -119,6 +131,360 @@ None.
 - [x] Extend CI with race and integration checks.
 - [x] Add cluster throughput/latency/failover benchmark.
 - [x] Update README and design documentation with measured evidence.
+
+## Phase 11 — Correctness Fixes
+
+- [x] A4: followers commit only through entries the leader verified (`f2fb1e6`).
+- [x] A1: embedded sequence numbers monotonic across reopen; manifest version 2
+  with `last_seq` and legacy upgrade (D016) (`648bda8`).
+- [x] A2: pre-vote rejections carry the responder's term (D017) (`c4f8c3a`); direct
+  grant-counting and persist-order tests (`dba010f`).
+- [x] A5: `ChangeMembership` completes when its configuration commits (`4d51087`).
+- [x] Reopen property test at 500 operations per seed by default; long mode via
+  `LSMDB_LONG_TESTS=1`; skipped under `-short` (`e656571`).
+
+## Phase 12a — Duplicate-Ack Resend Fix
+
+- [x] Send failures per measurement window, classed as deadline or other, recorded
+  by clusterbench through the `cluster` transport wrapper. The bench_compare
+  summary leads with total AppendEntries per committed entry (`ed9359d`).
+- [x] D018 written; RUNBOOK notes that `ack_resend` changes meaning at the fix.
+- [x] Leader sends a follow-up append only after an ack that advances `matchIndex`;
+  tests for duplicate acks, rejection probes, heartbeat catch-up, ReadIndex,
+  check-quorum, and a bound on AppendEntries per committed entry (`56267a1`).
+- [x] bench_compare passes machine and disk labels to arms whose clusterbench
+  accepts them (`27ba9ce`).
+- [x] Official Linux comparison and fix-arm duration sweep, judged against the
+  thresholds pre-registered in `dev/active/phase-12a-dup-ack-fix/plan.md`. Results
+  committed in `6d6dda7` (`benchmarks/results/2026-10-05-*`).
+  - **Comparison:** the fix is meaningful at every client count. Appends/entry
+    fell from 64–200 to 5.1–6.7, ops/s went from 21–38 to 137–151, and p99 at
+    4 clients from 672 to 45.7 ms.
+  - **Misses:** 8 of 10 thresholds pass. The duration-growth miss is explained by
+    the retained log (flat with snapshots every 1000 entries). The 16-vs-1-client
+    throughput miss is unexplained and deferred.
+
+## Phase 12b — AppendEntries Size Cap and Follower Log Copy
+
+Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
+
+- [x] Item 1: byte-capped AppendEntries (1 MiB, at least one entry), one entry-size
+  limit (4 MiB + 32 KiB) across proposal, store and transport, and a `nextIndex`
+  floor on rejection (`8c8a317`).
+  - The report A3 run over localhost gRPC went from 16 elections to 0.
+  - A 4 MiB value commits.
+  - An oversized Put returns `InvalidArgument`, and the leader keeps serving.
+- [x] Item 2: the follower copies and rescans its log only on truncation or a
+  configuration entry. A heartbeat to a follower holding 100,000 entries went
+  from 5.6 MB and 1.8 ms to 336 B and 0.5 µs.
+- [x] Official three-arm VM comparison (base, cap, copy), copy-arm duration sweep
+  and the large-value run, judged against the thresholds pre-registered in the
+  phase plan. Results committed in `ca35b90`
+  (`benchmarks/results/2026-10-05-p12b-*`).
+  - **Passed:** item 1 small values; the item 2 sweep (−0.26% appends/entry,
+    +2.19% ops/s from 10 to 60 s); item 2 throughput and p99 at every client
+    count; p99.9 at 1, 2 and 16 clients; 0 invalid runs, 0 elections; about 3
+    log syncs per entry.
+  - **p99.9 at 8 clients: MISS** (copy min 106.89 > cap max 106.37 ms). Copy
+    commits about 3× the entries per window, so this is not a like-for-like
+    percentile. Compaction volume is the likely cause (correlational).
+  - **p99.9 at 4 clients: INCONCLUSIVE.**
+  - **Large values, cap arm alone: MISS, 0 of 5.** Copy 5 of 5; base 0 of 5 with
+    15–19 elections. `8c8a317` and `18369e8` ship together; bisect skips
+    `8c8a317`.
+
+## Phase 12b Hardening
+
+Details: `dev/active/phase-12b-hardening/`. Decision: D020 (accepted, gated).
+Items in commit order:
+
+- [x] The large-value test logs every node's term and commit index before
+  failing.
+- [x] Test timing under the race detector, without loosening any assertion or
+  changing any timeout (the 4x tick scaling was tried and not committed):
+  - (a) The in-memory chunking test waits until every node agrees on the
+    leader before write 0 (`8d3a6fe`). Not reproduced: one failure in a full
+    `-race` suite, fixed from reading `waitForMemoryLeader`.
+  - (b) **A3 under the race detector** (`15cda40`): under `-race`,
+    `TestLargeValueWritesKeepOneLeader` ran only with `LSMDB_RACE_STRESS=1`.
+    The skip was lifted in `53b5d70` (phase 13 (b)), after A3 passed 10 of
+    10 under `-race`, and 10 of 10 with 8 busy processes.
+  - The A3 failures are consistent with a transport backlog under race
+    overhead. They are not shown to be caused by the race detector: 3 of 40
+    against 0 of 40 is one-sided Fisher p ≈ 0.12 on its own.
+- [x] Flush and compaction counted and timed in the engine; per-window deltas in
+  clusterbench JSON (`bench_compare summarize` unchanged) (`e572346`).
+- [x] `Runtime.Close` returns after the runtime has stopped itself (still nil)
+  (`12547f5`).
+- [x] Every entry of an incoming append validated before any in-memory change
+  (index, term > 0, size, terms non-decreasing, at least `LogTerm`, at most the
+  message term). A violation is dropped, counted and logged, with no reject
+  (`f76d87e`).
+  - The checks read only the message, so they run in `Step` before the term
+    is adopted, the leader is recorded or the election timer is reset.
+  - The plan had placed them after the log-match check. This follows the
+    decision that every check runs before any in-memory change.
+  - **A leader whose appends are dropped as malformed gets replaced.** A
+    dropped append does not reset the follower's election timer or record the
+    leader, so followers that receive only malformed appends campaign. When an
+    election follows such drops, it is the drop, not a transport fault:
+    check `MalformedAppendsDropped` in `Status`, the runtime log line
+    "raft: dropped malformed append" and
+    `lsmdb_raft_malformed_appends_dropped_total` first.
+- [x] The client's message limit uses the server constant (`5fe0489`).
+- [ ] Raft log format guard: versioned file, `raft.log` guard directory,
+  refusal instead of truncation (D020), after the old-binary gate. Last and
+  optional.
+
+Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
+
+- **Prerequisite decision for phase 13 Step 1 (D019's phase 12c)** (decided
+  by D022; implemented in `53b5d70`):
+  heartbeats re-ship multi-MiB entries with no in-flight limit. A heartbeat
+  is a full append from `nextIndex` (`internal/raft/node.go:700-715`), and
+  `nextIndex` moves only on acks. Each send is its own goroutine with a
+  500 ms deadline (`internal/raftnode/runtime.go:512-527`).
+  - A lagging follower is sent the same 2.5 MiB entry every 20 ms tick: up to
+    125 MiB/s per lagging follower.
+  - Followers went up to 1,013 ms without leader contact. There were up to 204
+    deadline failures per node per run.
+  - Phase 13 Step 1 decides between entry-less heartbeats and an in-flight
+    limit, lite or full. These are D019's phase-12c items: "phase 12c" in
+    D019 and "phase 13 Step 1" here name the same work. Each option must keep
+    a catch-up path that meets D019's recovery bound.
+- **The vote handler has no lease check** (fixed by D021, `69aeaea`).
+  `handleVote` (`node.go:435-450`) had none, and `Step` adopts any higher
+  term first (`:142-147`). `handlePreVote` has one (`:401-402`). In 2 of 15
+  elections a node voted 2.8 and 9.6 ms after hearing the current leader.
+- **A deposed leader's sends keep running for up to 500 ms**, because they
+  are not cancelled on step-down. In one run, 43 sends from the old term were
+  still expiring after the new leader took over.
+- **The check-quorum window (5 ticks, 100 ms) is shorter than the election
+  timeout (5–10 ticks).** A leader steps down when multi-MiB acks take longer.
+  There were 2 step-downs in one run.
+- **A buffered tick shortens an election timeout.** A 5-tick timeout fired
+  83 ms after the timer reset: the runtime ticker can hold a tick that is
+  delivered right after the reset.
+- **The client retries ResourceExhausted on every node** (`cluster/client.go`
+  `retry`): up to 60 attempts 25 ms apart. It then returns the last node's
+  error, so an oversized response surfaces as "node is not the Raft leader".
+  Found in item 6's receive-limit mutation.
+
+## Phase 12b Vote Lease
+
+Details: `dev/active/phase-12b-vote-lease/`. Branch `phase-12b-vote-lease`
+from `658cfa0`. Decision: D021 (accepted).
+
+- [x] Step 1 (docs): context, plan, tasks and D021. Re-verified `node.go`
+  `:153-159`, `:413-414` and `:447-462` (at `e1123fc`: `:142-147`,
+  `:401-402`, `:435-450`; the code is unchanged).
+- [x] Guard tests first (`020f665`): (ii) out of lease, a vote is granted;
+  (iv) a rejoining node with an unchanged term does not depose the leader;
+  (iv-b) a node with a really higher term costs exactly one leader change;
+  (v) failover within `2 × ElectionTickMax` ticks over 20 seeds; (a) no vote
+  ignored after a leader stop; (b) a leader that loses its quorum steps down
+  within `2 × CheckQuorumTicks` ticks and is then out of lease. (iii) is the
+  existing A2 tests.
+- [x] The change (`69aeaea`): `inLease()` on the minimum election timeout,
+  the silent vote check in `Step`, and `Status.VotesIgnoredInLease`. Test (i)
+  and the minimum-timeout test failed first. Every guard fails under its
+  mutation.
+- [x] Secondary Mac check: `clusterbench -mode failover`, `658cfa0` against
+  `69aeaea`, interleaved, labeled secondary: PASS (verification log).
+
+Findings (not fixed on this branch):
+
+- **Split votes can repeat. Candidate fix after phase 13, not part of this
+  branch.** In test (a) (lag 4, seed 7), the two survivors drew equal
+  election timeouts twice in a row, and failover took 26 ticks. The count is
+  the same with and without the lease. The draw is a deterministic linear
+  congruential generator taken modulo 5
+  (`ElectionTickMax - ElectionTickMin`; `resetElectionTimer`,
+  `internal/raft/node.go:940-945`), so equal draws are common. The runtime
+  seeds it with the node ID alone (`cluster/node.go:165`). Candidate fixes:
+  a wider range, or seeding by node ID and term.
+- **Lockstep test simulations can hide ordering bugs.** With test (iv)'s
+  one-step rejoin, the leader's heartbeat always reached the rejoining node
+  first, so removing the lease went undetected until the rejoin was split
+  into two steps.
+
+## Phase 13 — Raft Group Commit
+
+Details: `dev/active/phase-13-group-commit/`. Branch `phase-13-group-commit`
+from `d0e7c26`. Decision: D022 (accepted 2026-10-05, measured
+2026-10-06). "Phase 13 Step 1" here and "phase 12c" in D019 name the same
+prerequisite work.
+
+- [x] Step 1 (docs): context, plan, tasks and D022 (`4495dfa`).
+  - Re-verified every location in analysis report §2A at `d0e7c26`.
+  - Changed since the report: the resend rule (D018), the append cap and the
+    follower log copy (D019), and the follower commit rule (phase 11).
+    Every other location moved but is unchanged.
+  - Thresholds P1–P7 are pre-registered against the copy arm `18369e8`.
+- [x] (a) The write result carries the committed entry's term (rank 14,
+  `6aa09ce`). The handler no longer queues a status event per write.
+- [x] (b) In-flight limit lite (`53b5d70`, the prerequisite arm).
+  - One outstanding entry-carrying append per follower, re-sent after 5
+    ticks.
+  - Catch-up within (R + C + k) × 5 ticks.
+  - At most 5 copies of a chunk to a silent follower in any 25 ticks.
+  - A3 runs under `-race` again: 10 of 10, and 10 of 10 under load.
+- [x] (c) Tracked docs: D022 accepted with its as-built details; this tracker.
+- [x] (d) Leader batching (`9cad487`).
+  - `Node.ProposeBatch` appends queued proposals in input order with one
+    update: one sync and one append per follower.
+  - The runtime drains without blocking: up to 256 proposals, 1 MiB
+    accounted (len + 32), or one queue of events. No linger.
+  - In-memory cluster: 2.06–2.72 leader entries per sync at 8 proposers and
+    4.12–5.48 at 16 (10 of 10 runs).
+- [x] (e) Follower coalescing (`333eb24`).
+  - Queued appends from the same leader are persisted with one sync. The
+    merge stops at any update with hard state, truncation, snapshot or role
+    change, which is then persisted alone.
+  - Every coalesced append is answered, and none before its persist.
+  - The 3-repetition secondary check failed its 25% rule at 4 clients; the
+    one-pass 10-repetition recheck passed (see the verification log). The
+    two-mode throughput at 4 clients on the Mac is unexplained.
+- [x] Leader and follower split of log syncs (`46fed0f`), non-behavioral.
+  The two parts sum to the existing totals; clusterbench reports both per
+  window. Older arms lack the split, so it is reported for the final arm
+  only.
+- [x] Cap + 1 on the default queue (`88f232c`), test only. The default queue
+  stays 256 events: it also sizes the outgoing send queue, so raising it
+  would change backpressure in every arm.
+- [x] (f) Shared read probes (`b7ac098`; guard test `a76f182`).
+  - The reads queued when the leader handles a read share one probe and
+    complete together on its current-term quorum, at the commit index then
+    applied. If events are already deferred, only the reads at the head of
+    that list share it.
+  - A read that arrives after a probe was sent gets its own probe.
+  - **Reads may pass queued proposals (an argument, not a tested
+    property).** With nothing deferred, the leader drains the whole queue
+    for reads, so a read can be answered before proposals queued ahead of
+    it. Each such proposal is unacknowledged: its client has no response
+    yet, so the write is concurrent with the read and may be ordered after
+    it. A client that has its write's response has already seen it commit
+    and apply, so its next read arrives later and gets an index at least
+    the commit index at its arrival.
+  - **The final arm is `a76f182`;** it differs from `b7ac098` only by a
+    test.
+- [x] Official four-arm VM comparison and large-value stage (2026-10-06),
+  judged against the thresholds pre-registered in the phase plan. Results
+  committed in `a503f42` (`benchmarks/results/2026-10-06-p13-*`).
+  - Arms: storm `bfa2a77`, copy `18369e8`, prerequisite `53b5d70`, final
+    `a76f182`. 1, 4 and 16 clients, 5 repetitions, 60 runs.
+  - Setup: GCE e2-standard-4 with a 100 GB pd-ssd boot disk (network
+    storage). Official protocol (5 s warmup, 30 s window, arms
+    interleaved).
+  - 60 of 60 runs valid, 0 elections in any window, 0 failed operations.
+  - **All seven thresholds PASS** (final against copy, median [min, max]):
+    - P1: complete, 30 of 30 copy and final runs valid.
+    - P2: 6.31 [6.29, 6.33] entries per log sync at 16 clients, need
+      ≥ 2.0.
+    - P3: 1.62 [1.60, 1.64] at 4 clients, need ≥ 1.10; min above copy's
+      max of 1.00.
+    - P4: 1531.7 [1477.1, 1575.7] ops/s against 419.4 [410.0, 442.4] at
+      16 clients, ×3.652, need ≥ 1.5; ranges disjoint.
+    - P5: 559.3 against 437.5 at 4 clients, ×1.278, need ≥ 0.95; ranges
+      disjoint.
+    - P6: 1-client p50 ×0.997 (need ≤ 1.10), throughput ×1.006 (need
+      ≥ 0.90).
+    - P7: A3 passed 5 of 5 on prerequisite and on final on the VM; copy
+      passed 5 of 5; storm passed 0 of 5 as expected (12–23 elections per
+      run); no hangs. `go test ./...` passed on the VM. The `-race`
+      evidence is from the Mac at `21be5d5`. On GitHub runners A3 failed
+      2 of 4 runs (see "A3 on GitHub runners" under "After Phase 13").
+    - The environment check is in band: copy's 4-client median is 437.5
+      (374.7–506.9).
+  - **Attribution:**
+    - The headline is "from `18369e8` to the final arm"; that range also
+      holds D020 and D021.
+    - Final against prerequisite (batching) is credited at 16 clients
+      only: ×2.910, ranges disjoint.
+    - At 4 clients (×1.109) and 1 client (×0.973) the ranges overlap, so
+      nothing is credited there.
+  - **Reported, not judged:**
+    - Final's leader and follower entries per sync: 1.13 / 2.06 at 4
+      clients, 4.03 / 8.82 at 16.
+    - Final's throughput rises from 234.6 to 559.3 to 1531.7 ops/s at 1,
+      4 and 16 clients.
+  - **Caveats:**
+    - Final's p99.9 at 16 clients is 363.2 [352.1, 385.2] ms and its max
+      412.2 ms, about twice copy's (174.6, 201.0), while its p99 is 19.7
+      against 75.4 ms. The cause is unknown, and no claim is made beyond
+      p99.
+    - 5 deadline send failures in one final run (16 clients, repetition
+      3), expected 0, with 0 elections and 0 failed operations there.
+    - The gain depends on the platform and on fsync cost (pd-ssd 4 KiB
+      fsync p50 1.40–2.98 ms). It is not comparable to the Mac or to other
+      platforms.
+    - No linearizability claim.
+  - **Attempt 1:** stage 1 first stopped at run 43 of 60 on the harness
+    port race (see "After Phase 13"), before that run's measurement window.
+    The user approved one re-run as a one-time exception; attempt 2 is the
+    official run. The partial file is committed only with its INCOMPLETE
+    label and was not analyzed.
+- [x] Results and docs: D022 measured; this tracker.
+
+Linearizability: no linearizability checker exists in this repository, and
+phase 13 makes no linearizability claim. The tests above check single
+orderings by construction. The checker is separate work after phase 13.
+
+## After Phase 13
+
+Not fixed. Each item is its own change, after the stack is merged.
+
+- [ ] **Harness port race.** clusterbench's `freeAddress`
+  (`cmd/clusterbench/run.go:182-189`) closes its listener before the node
+  binds the port, so another socket can take it ("bind: address already in
+  use"). It stopped phase 13's first stage 1 attempt at run 43 of 60. The
+  fix is harness-only, with a test. It must be identical for all arms, or
+  live in the driver, so that arms built from older commits get it too.
+- [ ] **Split-vote timeout.** Equal election timeout draws can repeat (see
+  "Phase 12b Vote Lease", findings): a deterministic generator taken modulo
+  5 and seeded with the node ID alone. Candidate fixes: a wider range, or
+  seeding by node ID and term.
+- [ ] **Raft log format guard** (phase 12b hardening item 3, D020).
+  Optional, and last.
+- [ ] **Linearizability checker.** Phase 13 and earlier phases make no
+  linearizability claim beyond the single-ordering tests.
+- [ ] **p99.9 tail at 16 clients.** Final's p99.9 and max are about twice
+  copy's while its p99 is a quarter of copy's. The cause is unknown and was
+  not investigated. Candidates to check: batch-sized persists at the cap,
+  and compaction volume (final commits about 3.7× the entries per window).
+- [ ] **A3 on GitHub runners.** `TestLargeValueWritesKeepOneLeader` at the
+  final arm's code failed 2 of 4 CI runs on GitHub-hosted runners: 2 and 3
+  elections, 0 failed writes.
+  - Passed: both runs on `0ea54ac`.
+  - Failed: both runs on `a0659aa`, whose diff does not touch A3.
+  - Runner details: ubuntu-24.04, Go 1.22.0 from `go.mod` (the Mac and VM
+    used Go 1.26.1). The logs do not report the CPU count.
+  - Not reproduced locally: 0 of 30 under `-race -cpu 2`, with load
+    average 2.3–3.2. The diagnosis is inconclusive.
+  - Not separated:
+    - environment stalls;
+    - check-quorum step-downs (a 5-tick window against the election
+      timeout, with multi-MiB entries);
+    - an election by a node that heard the leader recently.
+  - The saved diagnostics patch (2026-10-05, for `e1123fc`) no longer
+    applies and would need porting.
+  - CI skips A3 unless `LSMDB_RACE_STRESS=1` is set. Next: run it on a
+    runner-like machine with the diagnostics.
+- [x] **Three test flakes seen on GitHub runners, fixed at the tip**
+  (test-only commit on `phase-13-group-commit`). They showed on the stacked
+  PRs' intermediate commits:
+  - **`TestOfflineFollowerRecoversThroughInstalledSnapshot`:** depended on
+    snapshot alignment. An election during the writes adds a no-op, so the
+    last write can land just past a threshold snapshot, and the leader then
+    never compacts through it. Fixed with (threshold − 1) filler writes to
+    another key; the assertion is unchanged.
+  - **`TestCloseReturnsAfterRuntimeStoppedItself`:** a `Propose` racing a
+    runtime failure can find both its result and `done` ready, and `select`
+    picks between them at random. The test now accepts the injected error
+    or `raft.ErrStopped`. Any future test that races those two channels has
+    the same shape.
+  - **`TestMaxSizeValueCommitsAndReplicates`:** the 4 MiB Put's deadline was
+    raised from 20 s to 60 s; the assertions are unchanged.
 
 ## Verification Log
 
@@ -190,6 +556,280 @@ None.
 - 2026-08-27 — post-documentation `go test ./...` — PASS.
 - 2026-08-27 — post-documentation `go vet ./...` — PASS.
 - 2026-08-27 — post-documentation default and five-node Compose configuration — PASS.
+- 2026-10-05 — phase 11: each fix's new tests FAIL on the unmodified code and PASS
+  after the fix. Guard tests fail under deliberate mutations. Details in
+  `dev/active/phase-11-correctness-fixes/tasks.md`.
+- 2026-10-05 — phase 11 after every commit: gofmt (changed files), `go vet ./...`,
+  `go test ./...`, `go test -race ./...` — PASS.
+- 2026-10-05 — phase 11: the reopen property test (500 operations) FAILS on all four
+  seeds at `f2fb1e6` (steps 58, 318, 116, 86) and PASSES after A1.
+- 2026-10-05 — phase 11: a binary built from `bd67696` rejects a version-2 manifest
+  with `manifest version 2 is unsupported`.
+- 2026-10-05 — phase 11: cluster restart, snapshot-install and membership tests under
+  `-race` — PASS.
+- 2026-10-05 — phase 11: clusterbench at 1 and 4 clients, main vs branch,
+  interleaved — no regression. This was a sanity check, not a benchmark result.
+
+- 2026-10-05, phase 12b:
+  - After each of `bc8e7c7`, `8c8a317` and the item 2 commit: gofmt clean,
+    `go vet ./...` plus each script, and `go test -count=1 ./...` and
+    `go test -count=1 -race ./...` pass.
+  - The item 2 cost test passed 20 of 20 runs under `-race`, with time ratios
+    0.50–1.08 against a bound of 3.
+  - After `9213d83`, `f895b7e`, `0c9298e` and the results commit `ca35b90`: the
+    same suite passes.
+
+- 2026-10-05, phase 12b hardening:
+  - After commit 0 (`966e951`, docs only): gofmt (no Go files), `go vet ./...`
+    and `go test -count=1 ./...` pass. `go test -count=1 -race ./...` FAILED in
+    `lsmdb/cluster` only: `TestMemoryClusterShipsLargeEntriesInCappedChunks`
+    ("write 0: raft node is not leader") and `TestLargeValueWritesKeepOneLeader`
+    (1 election, commit 26 on all nodes). The code equals `ca35b90`.
+  - Re-run per the approved rule: `go test -race -count=10 ./cluster` passes, 10
+    of 10 (139.9 s). Earlier, the two tests alone passed 20 of 20 under `-race`.
+  - Item 1, on an `8c8a317` worktree under `-race`: the old test fails with only
+    `status of node 1: context deadline exceeded`; the new one logs all three
+    nodes (leader at commit 18, both followers' Status timing out, 0 elections
+    among the 1 node that answered). The new file vets and lists on `6d6dda7`
+    and `8c8a317`, and passes on the tip with and without `-race`.
+  - Test timing, first attempt (stopped, nothing committed): A3 reproduced
+    under 8 busy processes (3 of 10 failed, with 1–3 elections). A 4x tick
+    scaling under a `race` build tag still had a 2-election run, so it stopped
+    on stop condition 4. The in-memory failure did not reproduce in about 192
+    runs.
+  - (a) on `e1123fc`, before committing: gofmt, vet and `go test ./...` pass.
+    `go test -race ./...` failed only in A3 (1 election). Under rule 1,
+    `go test -race -count=10 ./cluster` passed 8 of 10, both failures A3 (11
+    and 12 elections, 0 failed writes, equal commits), so it stopped there.
+  - Control, A3 alone under `-race`, interleaved blocks of 10: `966e951` 0 of
+    40, `e1123fc` 0 of 40 (load average 1.5–8.4). The rule needed at least 5
+    failures, so it could not fire. At 0 of 40, each arm's true rate could
+    still be up to about 7.5%.
+  - Diagnostics, A3 alone, temporary and reverted. They recorded event-loop,
+    persist and fsync times, elections, send failures and scheduler lateness.
+    - With `-race`: 1 of 20 failed at ambient load, 2 of 20 with 8 busy
+      processes.
+    - Without `-race`: 0 of 40.
+    - Worst stalls with `-race`: persist 189 ms, fsync 47 ms, event-loop
+      iteration 420 ms, tick gap 733 ms, inbound queue wait 604 ms, scheduler
+      107 ms late. Without `-race`: persist 27 ms, fsync 26 ms.
+    - In the 500 ms before the election analysed in detail, no stall reached
+      50 ms on any node.
+    - Every pre-vote grant came from a node whose lease had lapsed, and the
+      initiators rotated.
+  - After (a) `8d3a6fe`: gofmt, vet, `go test ./...` and `-race` pass (17 ok
+    each).
+  - Before (b), under `-race` at ambient load, `-count=10`: the 4 MiB commit
+    test and the oversized Put test, 10 of 10 each.
+  - After (b) `15cda40`: `go test -race -count=10 ./cluster` passes all 10
+    iterations (A3 skipped). `LSMDB_RACE_STRESS=1` runs A3 under `-race` (3 of
+    3 pass). gofmt, vet, `go test ./...` and `-race` pass (17 ok each).
+  - Items 2, 5, 4 and 6: each test failed first on the previous code.
+    - Item 2: build failures. Item 6: two mutations (its test cannot fail on
+      equal limits).
+    - Item 5: "runtime 2 of 32: Close did not return within 2s".
+    - Item 4: all 7 malformed cases were appended, and the conflict case also
+      truncated; the runtime stopped on the store's refusal.
+    - After each commit (`e572346`, `12547f5`, `f76d87e`, `5fe0489`): gofmt,
+      vet, `go test ./...` and `-race` pass, 17 ok each. No rule-1 re-run was
+      needed.
+  - Item 2 secondary Mac check (not a result, not committed): `aedb0dd` vs
+    `e572346`, 1 client, 5 repetitions, interleaved, 30 s windows.
+    - Median ops/s 107.5 vs 105.8 (−1.6%), within ±5%: PASS. 10 of 10 runs
+      valid.
+    - In one counters-arm window: 9 flushes, 0.31 s of 0.41 s apply time.
+- 2026-10-05, phase 12b vote lease (branch `phase-12b-vote-lease`):
+  - Step 1 `c58c030`: docs only. gofmt, vet, `go test ./...` and `-race`
+    pass (17 ok each).
+  - Guard tests `020f665`, on the code before the change: all pass. (a) has
+    no tick bound: on this code lag 4, seed 7 took 26 ticks after two split
+    votes, without the lease.
+  - Before the change (the Status field added alone): (i) failed with "node
+    3: term 1 -> 2, votedFor 1 -> 2" and leader 1 deposed ("follower at 2,
+    want leader at 1"). The minimum-timeout test failed at elapsed 0 and 4.
+  - After `69aeaea`: all pass. Per-seed failover tick counts for (v) and (a)
+    are identical before and after (80 of 80 lines).
+  - Mutations, each failing the guard at its own assertion:
+    - pre-candidates in lease fails (ii);
+    - no lease on either path fails (iv);
+    - lease on the randomized timeout, or with no elapsed bound, fails the
+      minimum-timeout test;
+    - lease counted from the last timer reset fails (v), (a) and (b);
+    - check-quorum never stepping down fails (b);
+    - removing D017's adoption fails (iii);
+    - no reply to a lower-term append fails (iv-b);
+    - the check moved after term adoption fails (i).
+  - After each commit: gofmt, vet, `go test ./...` and `-race` pass, 17 ok
+    each. No rule-1 re-run was needed.
+  - Secondary Mac check (not a result, not committed): `658cfa0` against
+    `69aeaea`, `clusterbench -mode failover`, 1 client, 10 repetitions
+    interleaved, 5 s warmup, 10 s windows; load average 2.3 at the start
+    and 3.1 at the end.
+    - Pass rule set in `plan.md` before running: every probe succeeds, and
+      the median `failover_ms` is within ±25% or the ranges overlap.
+    - Probes: 10 of 10 in each arm. Median `failover_ms` 223.3 (pre) against
+      209.9 (lease), −6.0%; ranges 154.5–267.4 and 136.4–263.6. PASS.
+    - Observation, not a result: 2 pre-arm windows had 2 elections each
+      (term 1 -> 3) and were invalid for throughput; the lease arm had none
+      in 10. That is 2 of 10 against 0 of 10, too few to separate.
+      Throughput: not meaningful (ranges overlap).
+- 2026-10-05, phase 13 Step 1 (`phase-13-group-commit`): docs only, no code.
+  Nothing to run.
+- 2026-10-05, phase 13 (a) `6aa09ce`:
+  - The new term test failed first, with the term unset ("term 0; the
+    entry at that index has term 5").
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+- 2026-10-05, phase 13 (b) `53b5d70`:
+  - Five new tests failed on the pre-change engine; a sixth (the commit
+    guard) passed on both.
+  - Each of six mutations fails its named test:
+    - heartbeats always carry the chunk;
+    - proposals ignore the outstanding append;
+    - resend every tick;
+    - never resend;
+    - entry-less appends carry `LeaderCommit` 0;
+    - heartbeats suppressed while an append is outstanding.
+  - A3 under `-race`, `-count=10`: 10 of 10 at ambient load and 10 of 10
+    with 8 busy processes.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+  - Secondary Mac check (not a result, not committed): `6aa09ce` against
+    `53b5d70`, 1, 4 and 16 clients, 3 repetitions interleaved, 5 s warmup,
+    10 s windows. Load average 3.7 at the start, 3.4 at the end.
+    - Pass rule from the plan: every run valid, and no median regression
+      beyond 25%.
+    - All 18 runs were valid: 0 elections, 0 failed operations. **PASS.**
+
+    | clients | ops/s, before -> after | entries per sync | appends per entry |
+    |---:|---|---|---|
+    | 1 | 98.4 -> 97.1 | 1.00 -> 1.00 | 5.64 -> 5.02 |
+    | 4 | 105.6 -> 163.5 | 1.00 -> 1.54 | 6.88 -> 2.06 |
+    | 16 | 99.0 -> 220.3 | 1.00 -> 2.40 | 6.86 -> 0.82 |
+
+    - Observation: the prerequisite alone already batches follower syncs.
+      This is why the VM run has a prerequisite arm.
+
+- 2026-10-06, phase 13 (d) `9cad487`:
+  - Failing first, on the pre-change engine with a `ProposeBatch` stub: the
+    three `ProposeBatch` tests, five runtime batch tests and
+    `TestLeaderBatchesConcurrentProposals` (1.00 entries per sync at 8 and
+    16 proposers, want > 1). Four guards pass on both: own index per
+    proposal, leader change mid-batch, follower drain, retried client
+    writes.
+  - Each of eleven mutations fails its named test: batch cap 1; no byte
+    cap; no count cap; complete only the last index; a role change fails
+    only the first waiter; `ErrNotLeader` to the first only; complete before
+    persist; reject the whole batch on an oversize item; deferred events
+    LIFO; reversed input order; no dedup check.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+  - Secondary Mac check (not a result, not committed): `53b5d70` against
+    `9cad487`, 1, 4 and 16 clients, 3 repetitions interleaved, 5 s warmup,
+    10 s windows. Load average 2.8 at the start, 4.8 at the end.
+    - All 18 runs valid: 0 elections, 0 failed operations. **PASS.**
+
+    | clients | ops/s median, before -> after | entries per sync |
+    |---:|---|---|
+    | 1 | 109.4 -> 102.6 (−6.2%) | 1.00 -> 1.00 |
+    | 4 | 167.8 -> 183.6 (+9.4%) | 1.54 -> 1.69 |
+    | 16 | 225.6 -> 639.0 (+183%) | 2.41 -> 6.77 |
+
+- 2026-10-06, phase 13 (e) `333eb24`:
+  - Failing first: `TestQueuedAppendsArePersistedTogether`,
+    `TestCoalescingStopsAtHardState` and
+    `TestPersistFailureFailsEveryMergedAppend`. Two guards pass on both:
+    every coalesced response is sent, and none before the merged persist.
+  - Each of five mutations fails its named test: no coalescing; merge
+    across a term change; keep only the last ack per destination; send
+    before persisting; report the failure to the first append only.
+    - The first "merge across hard state" mutation was equivalent: adopting
+      a higher term also sets `RoleChanged`, which stopped the merge anyway.
+      It was redefined to ignore both.
+    - The send-before-persist mutation first hung the test at cleanup (a
+      held persist blocks `Close`); the gate store now releases held
+      persists at cleanup.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+  - Secondary Mac check (not a result, not committed): `9cad487` against
+    `333eb24`, same settings as (d). Load average 3.4 at the start, 3.1 at
+    the end. All 18 runs valid. **FAIL** at 4 clients: median 258.5 ->
+    187.8 ops/s (−27.4%), past the 25% rule. 1 client +1.8%, 16 clients
+    −4.0%. Entries per sync 1.68 -> 1.69. Not re-run; stopped for a
+    decision.
+  - Recheck, one pass of a rule set before running: 4 clients, 10
+    repetitions per arm, 5 s warmup, 10 s windows, secondary label. Pass if
+    the median ratio is >= 0.85 or the ranges overlap; fail if the ratio is
+    < 0.85 and the ranges are disjoint.
+    - Order: `bench_compare` rotates the first arm with each repetition,
+      so the runs went A B, B A, A B, ... and not A B A B as asked.
+    - 1-minute load average 1.6–3.5 at run starts, 3.1 at the end.
+    - `9cad487`: 10 of 10 valid, median 194.9 ops/s, range 174.7–269.0.
+    - `333eb24`: 9 of 10 valid, median 182.2, range 173.5–268.1. One window
+      had 2 elections (term 1 -> 3) and is excluded; 0 failed operations.
+    - Ratio 0.935, ranges overlap. **PASS.**
+    - Entries per sync per run: 1.63–1.72 (`9cad487`) and 1.56–1.78
+      (`333eb24`).
+  - Observation, unresolved: throughput at 4 clients on this Mac falls in
+    two modes, about 160–205 and about 240–280 ops/s, in every arm from the
+    prerequisite `53b5d70` on (the rank-14 arm `6aa09ce` ran 101–106 in its
+    3 runs). The same `9cad487` binary had a median of 183.6 in the (d)
+    check and 258.5 in the (e) check. In the recheck the high mode came in
+    4 of 10 `9cad487` runs and 1 of 9 `333eb24` runs, all within runs
+    12–17. Entries per sync do not differ between the modes. Neither the
+    cause nor whether coalescing changes the mode frequency is known; this
+    check cannot separate them.
+- 2026-10-06, phase 13 sync split `46fed0f`:
+  - Failing first: the store and cluster tests found no syncs by role, and
+    the clusterbench test did not build (no `LeaderLogSyncs` field).
+  - Mutations: every sync attributed to the leader fails the store and
+    cluster tests; the report reading the leader part from the follower
+    counter fails the clusterbench test.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+- 2026-10-06, phase 13 cap + 1 `88f232c` (test only):
+  - Passes on the unchanged runtime (20 of 20): entries per persist
+    [1 256 1].
+  - Mutations: batch cap 255 gives [1 255 2]; no count cap gives [1 257]
+    (10 of 10).
+  - After the commit: all checks pass, 17 ok each.
+- 2026-10-06, phase 13 (f) `b7ac098` and guard `a76f182`:
+  - Failing first: `TestQueuedReadsShareOneProbe` (4 read contexts to node
+    2, want 1). `TestSharedProbeStillNeedsQuorum` passes on both, a guard.
+  - Mutations: one probe per read fails the first; completing on the
+    leader's own ack fails the second.
+  - `TestLateReadGetsItsOwnProbe` (`a76f182`) passes on `b7ac098` (20 of
+    20), so (f) has no such bug. A late read joining the earlier probe's
+    context fails it: `late read returned index 2 error <nil> on the
+    earlier probe's ack`.
+  - The read index is taken when the probe reaches quorum, not when the
+    read arrives; it is never below the commit index at arrival. This
+    predates (f).
+  - After each commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+- 2026-10-06, phase 13 VM run (results `a503f42`):
+  - **Setup checks:**
+    - Go tarball hash matches go.dev.
+    - Bundle hash matches, and the clone tip is `21be5d5`.
+    - nproc = nproc --all = 4, `cpu.max` is `max 100000`, and
+      `go test ./...` passes.
+  - **Pre-flight before each stage:** tip `21be5d5`, clean tree, nothing
+    running, and two consecutive 1-minute load readings under 0.5.
+  - **Stage 1, attempt 2:**
+    - exited 0, `complete: true`;
+    - `vm_smoke_check` passes all ten checks, with `-forbid` for the VM
+      hostname, username and project id.
+  - **Stage 2:** A3 `-count=5` per arm in 10–88 s, with no hangs.
+  - **Retrieval:**
+    - 114 files match the VM's SHA256SUMS.
+    - The copies committed in `a503f42` match it too.
+    - The grep for hostname, project id, username, `/home/`, `/Users/`,
+      `.internal` and IPv4 finds nothing in the committed files.
+  - **Teardown:** the VM was deleted with its disk. Instances, disks,
+    addresses, snapshots and custom images list 0 items.
+  - **After `a503f42` and the docs commit:** gofmt (no Go files changed),
+    `go vet ./...`, `go test ./...` and `go test -race ./...` pass, 17 ok
+    each.
 
 ## Blockers
 
@@ -198,4 +838,14 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-None for v1.0.0. Optional stale follower reads remain deferred.
+Vote lease (D021) is done on `phase-12b-vote-lease`. Phase 12b hardening item
+3 (the log format guard) comes last and is optional, and is not started.
+
+Phase 13 (D022) is built and measured: P1–P7 all PASS (`a503f42`).
+
+The stack is to be pushed and merged with merge commits, in this order:
+`phase-11-correctness-fixes`, `phase-10-benchmark-harness-v2`,
+`phase-12a-dup-ack-fix`, `phase-12b-append-size-and-log-copy`,
+`phase-12b-hardening`, `phase-12b-vote-lease`, `phase-13-group-commit`.
+After it is merged, the next work comes from "After Phase 13".
+Optional stale follower reads remain deferred.

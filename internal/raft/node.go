@@ -30,6 +30,14 @@ type Node struct {
 	nextIndex    map[uint64]uint64
 	matchIndex   map[uint64]uint64
 	recentActive map[uint64]bool
+	// outstanding is the last index of the entry-carrying append in flight to
+	// each peer, or 0; outstandingAge counts leader ticks since it was sent.
+	// While one is outstanding, appends to that peer carry no entries (D022).
+	outstanding    map[uint64]uint64
+	outstandingAge map[uint64]int
+
+	malformedAppendsDropped uint64
+	votesIgnoredInLease     uint64
 }
 
 // New constructs a node from durable hard state and log entries.
@@ -96,9 +104,15 @@ func (n *Node) Tick() Update {
 	if n.role == Leader {
 		n.heartbeatElapsed++
 		n.quorumElapsed++
+		expired := n.expireOutstanding()
 		if n.heartbeatElapsed >= n.cfg.HeartbeatTicks {
 			n.heartbeatElapsed = 0
-			update.Messages = append(update.Messages, n.broadcastAppend()...)
+			update.Messages = append(update.Messages, n.broadcastAppend(OriginHeartbeat)...)
+		} else {
+			// An expired append is re-sent now, not at the next heartbeat.
+			for _, peer := range expired {
+				update.Messages = append(update.Messages, n.appendMessage(peer, 0, OriginHeartbeat))
+			}
 		}
 		if n.quorumElapsed >= n.cfg.CheckQuorumTicks {
 			n.quorumElapsed = 0
@@ -136,6 +150,22 @@ func (n *Node) Step(message Message) Update {
 		return update
 	}
 	if !n.isCommunicationPeer(message.From) || message.From == n.cfg.ID {
+		return update
+	}
+	// A malformed append changes nothing, not even the term or the election
+	// timer, so a leader that only sends such messages is replaced.
+	if message.Type == MsgAppend {
+		if reason := malformedAppend(message); reason != "" {
+			n.malformedAppendsDropped++
+			update.DroppedAppend = fmt.Sprintf("from %d at term %d: %s", message.From, message.Term, reason)
+			return update
+		}
+	}
+	// A vote request at a higher term reaching a node in its lease is ignored
+	// before the term is adopted (D021). A reply would carry this node's lower
+	// term, and the candidate's stale-term answer would end the lease anyway.
+	if message.Type == MsgVote && message.Term > n.term && n.inLease() {
+		n.votesIgnoredInLease++
 		return update
 	}
 
@@ -227,7 +257,7 @@ func (n *Node) ProposeMembership(voters []uint64) (uint64, Update, error) {
 	n.matchIndex[n.cfg.ID] = entry.Index
 	n.nextIndex[n.cfg.ID] = entry.Index + 1
 	update := Update{Entries: []Entry{cloneEntry(entry)}}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginOther)...)
 	update.merge(n.maybeCommit())
 	return entry.Index + 1, update, nil
 }
@@ -243,17 +273,43 @@ func (n *Node) CreateSnapshot(index uint64, data []byte) (Update, error) {
 
 // Propose appends a command on the leader and starts replication.
 func (n *Node) Propose(data []byte) (uint64, Update, error) {
-	if n.role != Leader {
-		return 0, Update{}, ErrNotLeader
+	if len(data) > MaxEntryBytes {
+		return 0, Update{}, ErrEntryTooLarge
 	}
-	entry := Entry{Index: n.lastIndex() + 1, Term: n.term, Data: append([]byte(nil), data...)}
-	n.log = append(n.log, entry)
-	n.matchIndex[n.cfg.ID] = entry.Index
-	n.nextIndex[n.cfg.ID] = entry.Index + 1
-	update := Update{Entries: []Entry{cloneEntry(entry)}}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	indexes, update, err := n.ProposeBatch([][]byte{data})
+	if err != nil {
+		return 0, Update{}, err
+	}
+	return indexes[0], update, nil
+}
+
+// ProposeBatch appends commands on the leader in input order and starts
+// replication once, so the whole batch is persisted by one Update (D022).
+// indexes[i] is command i's log index, or 0 if it exceeds MaxEntryBytes; the
+// other commands are appended anyway. Unless this node is leader it returns
+// ErrNotLeader and appends nothing.
+func (n *Node) ProposeBatch(data [][]byte) (indexes []uint64, update Update, err error) {
+	if n.role != Leader {
+		return nil, Update{}, ErrNotLeader
+	}
+	indexes = make([]uint64, len(data))
+	for i, command := range data {
+		if len(command) > MaxEntryBytes {
+			continue
+		}
+		entry := Entry{Index: n.lastIndex() + 1, Term: n.term, Data: append([]byte(nil), command...)}
+		n.log = append(n.log, entry)
+		update.Entries = append(update.Entries, cloneEntry(entry))
+		indexes[i] = entry.Index
+	}
+	if len(update.Entries) == 0 {
+		return indexes, Update{}, nil
+	}
+	n.matchIndex[n.cfg.ID] = n.lastIndex()
+	n.nextIndex[n.cfg.ID] = n.lastIndex() + 1
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginProposal)...)
 	update.merge(n.maybeCommit())
-	return entry.Index, update, nil
+	return indexes, update, nil
 }
 
 // ReadProbe emits a contextual heartbeat used to confirm current leadership.
@@ -267,7 +323,7 @@ func (n *Node) ReadProbe(context uint64) (Update, error) {
 	update := Update{}
 	for _, peer := range n.peers() {
 		if peer != n.cfg.ID {
-			update.Messages = append(update.Messages, n.appendMessage(peer, context))
+			update.Messages = append(update.Messages, n.appendMessage(peer, context, OriginOther))
 		}
 	}
 	return update, nil
@@ -284,7 +340,9 @@ func (n *Node) Status() Status {
 		ID: n.cfg.ID, Role: n.role, Term: n.term, LeaderID: n.leaderID,
 		CommitIndex: n.commit, LastLogIndex: n.lastIndex(), VotedFor: n.votedFor,
 		SnapshotIndex: n.snapshot.Index, RetainedLogEntries: uint64(len(n.log)),
-		Membership: cloneMembership(n.membership),
+		Membership:              cloneMembership(n.membership),
+		MalformedAppendsDropped: n.malformedAppendsDropped,
+		VotesIgnoredInLease:     n.votesIgnoredInLease,
 	}
 	if n.role == Leader {
 		status.MatchIndex = make(map[uint64]uint64, len(n.matchIndex))
@@ -360,6 +418,8 @@ func (n *Node) becomeLeader() Update {
 	n.nextIndex = make(map[uint64]uint64, len(n.peers()))
 	n.matchIndex = make(map[uint64]uint64, len(n.peers()))
 	n.recentActive = make(map[uint64]bool, len(n.peers()))
+	n.outstanding = make(map[uint64]uint64, len(n.peers()))
+	n.outstandingAge = make(map[uint64]int, len(n.peers()))
 	last := n.lastIndex()
 	for _, peer := range n.peers() {
 		n.nextIndex[peer] = last + 1
@@ -371,7 +431,7 @@ func (n *Node) becomeLeader() Update {
 	n.matchIndex[n.cfg.ID] = noop.Index
 	n.nextIndex[n.cfg.ID] = noop.Index + 1
 	update := Update{Entries: []Entry{noop}, RoleChanged: true}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginOther)...)
 	update.merge(n.maybeCommit())
 	return update
 }
@@ -394,20 +454,40 @@ func (n *Node) becomeFollower(term, leader uint64) Update {
 	return update
 }
 
+// inLease reports whether this node is in its vote lease (D021). A leader is in
+// lease by role; any other node while it has a leader it heard within
+// ElectionTickMin ticks. The randomized election timeout only spreads
+// campaigns, so it does not lengthen the lease.
+func (n *Node) inLease() bool {
+	return n.role == Leader || (n.leaderID != 0 && n.electionElapsed < n.cfg.ElectionTickMin)
+}
+
 func (n *Node) handlePreVote(message Message) Message {
 	leaderIsRecent := n.leaderID != 0 && n.electionElapsed < n.electionTimeout
 	grant := n.isVoter(n.cfg.ID) && message.Term >= n.term+1 && !leaderIsRecent && n.isUpToDate(message.LogIndex, message.LogTerm)
+	// A grant echoes the proposed term; a rejection reports this node's own term so a
+	// pre-candidate behind it can catch up. The receiver's term never changes here.
+	term := message.Term
+	if !grant {
+		term = n.term
+	}
 	return Message{
-		Type: MsgPreVoteResponse, From: n.cfg.ID, To: message.From, Term: message.Term,
+		Type: MsgPreVoteResponse, From: n.cfg.ID, To: message.From, Term: term,
 		Reject: !grant,
 	}
 }
 
 func (n *Node) handlePreVoteResponse(message Message) Update {
-	if n.role != PreCandidate || message.Term != n.term+1 {
+	// A live voter is at a newer term; adopt it so later pre-votes can succeed.
+	if message.Reject && message.Term > n.term {
+		return n.becomeFollower(message.Term, 0)
+	}
+	granted := !message.Reject && message.Term == n.term+1
+	rejected := message.Reject && message.Term <= n.term
+	if n.role != PreCandidate || (!granted && !rejected) {
 		return Update{}
 	}
-	n.votes[message.From] = !message.Reject
+	n.votes[message.From] = granted
 	if n.membership.hasQuorum(func(id uint64) bool { return n.votes[id] }) {
 		return n.startElection()
 	}
@@ -472,19 +552,14 @@ func (n *Node) handleAppend(message Message) Update {
 		return update
 	}
 
-	oldLog := make([]Entry, len(n.log))
-	for i := range n.log {
-		oldLog[i] = cloneEntry(n.log[i])
-	}
+	// Entries are never modified in place, so undoing this append needs only the
+	// old length and any truncated tail. Membership is the fold over the log, so
+	// it changes only on truncation or an appended configuration entry (D019).
+	oldLen := len(n.log)
+	var truncatedTail []Entry
+	rebuild := false
+	// Step has already checked every entry with malformedAppend.
 	for i, entry := range message.Entries {
-		expected := message.LogIndex + uint64(i) + 1
-		if entry.Index != expected || entry.Term == 0 {
-			update.Messages = append(update.Messages, Message{
-				Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term,
-				Reject: true, RejectHint: message.LogIndex + 1,
-			})
-			return update
-		}
 		if entry.Index <= n.lastIndex() {
 			if n.termAt(entry.Index) == entry.Term {
 				continue
@@ -493,30 +568,38 @@ func (n *Node) handleAppend(message Message) Update {
 				update.Messages = append(update.Messages, Message{Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.commit + 1})
 				return update
 			}
-			n.log = n.log[:entry.Index-n.snapshot.Index-1]
+			keep := entry.Index - n.snapshot.Index - 1
+			truncatedTail = append([]Entry(nil), n.log[keep:]...)
+			n.log = n.log[:keep]
 			update.TruncateFrom = entry.Index
+			rebuild = true
 		}
 		for _, remaining := range message.Entries[i:] {
+			rebuild = rebuild || hasMembershipPrefix(remaining.Data)
 			n.log = append(n.log, cloneEntry(remaining))
 			update.Entries = append(update.Entries, cloneEntry(remaining))
 		}
 		break
 	}
-	if err := n.rebuildMembership(); err != nil {
-		n.log = oldLog
-		update.TruncateFrom = 0
-		update.Entries = nil
-		update.Messages = append(update.Messages, Message{Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.lastIndex() + 1})
-		return update
+	if rebuild {
+		if err := n.rebuildMembership(); err != nil {
+			n.log = append(n.log[:oldLen-len(truncatedTail)], truncatedTail...)
+			update.TruncateFrom = 0
+			update.Entries = nil
+			update.Messages = append(update.Messages, Message{Type: MsgAppendResponse, From: n.cfg.ID, To: message.From, Term: n.term, Reject: true, RejectHint: n.lastIndex() + 1})
+			return update
+		}
 	}
 
+	// LogIndex is the previous index, so lastNew is the last entry this message proved.
 	lastNew := message.LogIndex + uint64(len(message.Entries))
 	if lastNew > n.lastIndex() {
 		lastNew = n.lastIndex()
 	}
-	if message.LeaderCommit > n.commit {
+	// Entries beyond lastNew may be a stale suffix; a delayed append must not move commit backward.
+	if commit := min(message.LeaderCommit, lastNew); commit > n.commit {
 		old := n.commit
-		n.commit = min(message.LeaderCommit, n.lastIndex())
+		n.commit = commit
 		update.Committed = append(update.Committed, n.entriesBetween(old+1, n.commit+1)...)
 	}
 	update.Messages = append(update.Messages, Message{
@@ -524,6 +607,34 @@ func (n *Node) handleAppend(message Message) Update {
 		LogIndex: lastNew, Context: message.Context,
 	})
 	return update
+}
+
+// malformedAppend returns why an append's entries cannot have come from a
+// correct leader, or "" if they are well formed. Entry i must have index
+// LogIndex+i+1, a term from LogTerm up to the message term that never
+// decreases, and at most MaxEntryBytes of data, as the stores require. It
+// reads only the message.
+func malformedAppend(message Message) string {
+	previous := message.LogTerm
+	for i, entry := range message.Entries {
+		want := message.LogIndex + uint64(i) + 1
+		switch {
+		case entry.Index != want:
+			return fmt.Sprintf("entry %d has index %d, want %d", i, entry.Index, want)
+		case entry.Term == 0:
+			return fmt.Sprintf("entry %d (index %d) has term 0", i, entry.Index)
+		case len(entry.Data) > MaxEntryBytes:
+			return fmt.Sprintf("entry %d (index %d) has %d bytes, over %d", i, entry.Index, len(entry.Data), MaxEntryBytes)
+		case entry.Term > message.Term:
+			return fmt.Sprintf("entry %d (index %d) has term %d, above the message term %d", i, entry.Index, entry.Term, message.Term)
+		case i == 0 && entry.Term < previous:
+			return fmt.Sprintf("entry 0 (index %d) has term %d, below LogTerm %d", entry.Index, entry.Term, previous)
+		case entry.Term < previous:
+			return fmt.Sprintf("entry %d (index %d) has term %d, below the previous entry's %d", i, entry.Index, entry.Term, previous)
+		}
+		previous = entry.Term
+	}
+	return ""
 }
 
 func (n *Node) handleSnapshot(message Message) Update {
@@ -581,16 +692,18 @@ func (n *Node) handleSnapshotResponse(message Message) Update {
 	}
 	n.recentActive[message.From] = true
 	if message.Reject {
-		return Update{Messages: []Message{n.appendMessage(message.From, 0)}}
+		n.outstanding[message.From] = 0
+		return Update{Messages: []Message{n.appendMessage(message.From, 0, OriginOther)}}
 	}
 	matched := min(message.LogIndex, n.lastIndex())
 	if matched > n.matchIndex[message.From] {
 		n.matchIndex[message.From] = matched
 		n.nextIndex[message.From] = matched + 1
 	}
+	n.settleOutstanding(message.From)
 	update := n.maybeCommit()
 	if n.nextIndex[message.From] <= n.lastIndex() {
-		update.Messages = append(update.Messages, n.appendMessage(message.From, 0))
+		update.Messages = append(update.Messages, n.appendMessage(message.From, 0, OriginOther))
 	}
 	return update
 }
@@ -607,17 +720,29 @@ func (n *Node) handleAppendResponse(message Message) Update {
 		} else if next > 1 {
 			next--
 		}
-		n.nextIndex[message.From] = max(1, next)
-		return Update{Messages: []Message{n.appendMessage(message.From, message.Context)}}
+		// Everything through matchIndex matches this term's log, so a rejection
+		// below it is stale. Under capped appends, letting it lower nextIndex
+		// would re-ship an already-matched chunk forever (D019).
+		n.nextIndex[message.From] = max(1, next, n.matchIndex[message.From]+1)
+		// A rejection settles whatever was in flight: the probe goes now.
+		n.outstanding[message.From] = 0
+		return Update{Messages: []Message{n.appendMessage(message.From, message.Context, OriginAckResend)}}
 	}
+	advanced := false
 	if message.LogIndex > n.matchIndex[message.From] {
 		matched := min(message.LogIndex, n.lastIndex())
+		advanced = matched > n.matchIndex[message.From]
 		n.matchIndex[message.From] = matched
 		n.nextIndex[message.From] = matched + 1
 	}
+	n.settleOutstanding(message.From)
 	update := n.maybeCommit()
-	if n.nextIndex[message.From] <= n.lastIndex() {
-		update.Messages = append(update.Messages, n.appendMessage(message.From, message.Context))
+	// A duplicate or stale ack proves nothing new, and answering it sustained
+	// endless append/ack chains (D018). A lost message is re-sent once its
+	// append has been outstanding for the resend timeout (D022). The follow-up
+	// is skipped when the commit advance above already carried entries.
+	if advanced && n.outstanding[message.From] == 0 && n.nextIndex[message.From] <= n.lastIndex() {
+		update.Messages = append(update.Messages, n.appendMessage(message.From, message.Context, OriginAckResend))
 	}
 	return update
 }
@@ -646,39 +771,108 @@ func (n *Node) maybeCommit() Update {
 		n.nextIndex[n.cfg.ID] = final.Index + 1
 		update.Entries = append(update.Entries, cloneEntry(final))
 	}
-	update.Messages = append(update.Messages, n.broadcastAppend()...)
+	update.Messages = append(update.Messages, n.broadcastAppend(OriginCommitAdvance)...)
 	if n.membership.Index <= n.commit && !n.isVoter(n.cfg.ID) {
 		update.merge(n.becomeFollower(n.term, 0))
 	}
 	return update
 }
 
-func (n *Node) broadcastAppend() []Message {
+func (n *Node) broadcastAppend(origin MessageOrigin) []Message {
 	peers := n.replicationPeers()
 	messages := make([]Message, 0, len(peers)-1)
 	for _, peer := range peers {
-		if peer != n.cfg.ID {
-			messages = append(messages, n.appendMessage(peer, 0))
+		if peer == n.cfg.ID {
+			continue
 		}
+		// A new proposal waits for the ack of the append in flight; its
+		// follow-up carries every entry proposed meanwhile (D022).
+		if origin == OriginProposal && n.outstanding[peer] != 0 {
+			continue
+		}
+		messages = append(messages, n.appendMessage(peer, 0, origin))
 	}
 	return messages
 }
 
-func (n *Node) appendMessage(peer, context uint64) Message {
+// appendMessage builds the next append to peer. While an entry-carrying append
+// to peer is outstanding it carries no entries, only the commit index and any
+// read context (D022); otherwise it carries the capped chunk from nextIndex and
+// becomes the outstanding append.
+func (n *Node) appendMessage(peer, context uint64, origin MessageOrigin) Message {
 	next := n.nextIndex[peer]
 	if next == 0 {
 		next = n.lastIndex() + 1
 	}
 	if next <= n.snapshot.Index {
 		snapshot := cloneSnapshot(n.snapshot)
-		return Message{Type: MsgSnapshot, From: n.cfg.ID, To: peer, Term: n.term, Snapshot: &snapshot}
+		return Message{Type: MsgSnapshot, From: n.cfg.ID, To: peer, Term: n.term, Snapshot: &snapshot, Origin: origin}
 	}
-	return Message{
+	message := Message{
 		Type: MsgAppend, From: n.cfg.ID, To: peer, Term: n.term,
 		LogIndex: next - 1, LogTerm: n.termAt(next - 1),
-		Entries: n.entriesBetween(next, n.lastIndex()+1), LeaderCommit: n.commit,
-		Context: context,
+		LeaderCommit: n.commit, Context: context, Origin: origin,
 	}
+	if n.outstanding[peer] != 0 {
+		return message
+	}
+	message.Entries = n.cappedEntries(next)
+	if len(message.Entries) > 0 {
+		n.outstanding[peer] = message.Entries[len(message.Entries)-1].Index
+		n.outstandingAge[peer] = 0
+	}
+	return message
+}
+
+// settleOutstanding ends peer's outstanding append once peer has matched
+// everything it carried.
+func (n *Node) settleOutstanding(peer uint64) {
+	if n.outstanding[peer] != 0 && n.matchIndex[peer] >= n.outstanding[peer] {
+		n.outstanding[peer] = 0
+	}
+}
+
+// expireOutstanding ages every outstanding append by one tick and ends those
+// that reached the resend timeout, returning their peers in ascending order.
+func (n *Node) expireOutstanding() []uint64 {
+	limit := n.cfg.inflightResendTicks
+	if limit == 0 {
+		limit = defaultInflightResendTicks
+	}
+	var expired []uint64
+	for _, peer := range n.replicationPeers() {
+		if n.outstanding[peer] == 0 {
+			continue
+		}
+		n.outstandingAge[peer]++
+		if n.outstandingAge[peer] >= limit {
+			n.outstanding[peer] = 0
+			expired = append(expired, peer)
+		}
+	}
+	return expired
+}
+
+// cappedEntries returns the entries from index from whose accounted size fits
+// the per-message cap, always at least one, so a single larger entry still
+// ships alone (D019).
+func (n *Node) cappedEntries(from uint64) []Entry {
+	if from <= n.snapshot.Index || from > n.lastIndex() {
+		return nil
+	}
+	limit := n.cfg.maxAppendBytes
+	if limit == 0 {
+		limit = defaultMaxAppendBytes
+	}
+	to, size := from, uint64(0)
+	for ; to <= n.lastIndex(); to++ {
+		entrySize := uint64(len(n.log[to-n.snapshot.Index-1].Data)) + EntryOverheadBytes
+		if to > from && size+entrySize > limit {
+			break
+		}
+		size += entrySize
+	}
+	return n.entriesBetween(from, to)
 }
 
 func (n *Node) rejectStale(message Message) Message {

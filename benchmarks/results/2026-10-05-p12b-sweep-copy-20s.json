@@ -1,0 +1,423 @@
+{
+  "schema_version": 1,
+  "label": "secondary",
+  "machine_type": "e2-standard-4",
+  "disk_type": "pd-ssd 100GB boot disk (network)",
+  "environment": {
+    "git_sha": "0c9298e4271b21e8b7f4f2ab99d1c7671f88d5fb",
+    "git_dirty": false,
+    "go_version": "go1.26.1",
+    "goos": "linux",
+    "goarch": "amd64",
+    "kernel": "7.0.0-1011-gcp",
+    "cpu_model": "Intel(R) Xeon(R) CPU @ 2.20GHz",
+    "ram_bytes": 16762150912,
+    "num_cpu": 4,
+    "gomaxprocs": 4,
+    "fsync_primitive": "fsync(2)",
+    "filesystem": "ext4",
+    "mount_options": "rw,relatime,rw,discard,errors=remount-ro,commit=30",
+    "block_device": "unknown"
+  },
+  "config": {
+    "mode": "throughput",
+    "clients": [
+      1
+    ],
+    "warmup_seconds": 5,
+    "duration_seconds": 20,
+    "repetitions": 5,
+    "snapshot_threshold": 1000000,
+    "tick_ms": 20,
+    "election_tick_min": 5,
+    "election_tick_max": 10,
+    "heartbeat_ticks": 1,
+    "check_quorum_ticks": 5,
+    "nodes": 3,
+    "seed": 1,
+    "seed_scope": "workload key sequence only; Raft election timing is seeded by node ID and identical across repetitions",
+    "value_size": 128,
+    "fsync_probe_samples": 200,
+    "official": false
+  },
+  "limitations": [
+    "Repetitions share Raft election timing (seeded by node ID), so run-to-run variance may be understated.",
+    "Snapshot cost is excluded: the snapshot threshold keeps snapshots out of the window; it is measured separately.",
+    "All three nodes and the clients share one process, CPU, and disk; fsyncs from different nodes contend.",
+    "Clients are closed-loop, so latency under overload is subject to coordinated omission."
+  ],
+  "runs": [
+    {
+      "repetition": 1,
+      "clients": 1,
+      "valid": true,
+      "window_seconds": 20.000639054,
+      "ops_ok": 4269,
+      "ops_failed": 0,
+      "retries": 0,
+      "throughput_ops_per_sec": 213.44317991410514,
+      "latency_ms": {
+        "p50": 4.60891,
+        "p95": 5.442843,
+        "p99": 6.024015,
+        "p99_9": 10.257377,
+        "max": 62.367305
+      },
+      "terms_start": [
+        1,
+        1,
+        1
+      ],
+      "terms_end": [
+        1,
+        1,
+        1
+      ],
+      "elections_in_window": 0,
+      "committed_entries": 4269,
+      "fsync_before": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.706096,
+        "p99_ms": 2.37597
+      },
+      "fsync_after": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.811223,
+        "p99_ms": 2.516309
+      },
+      "counters": {
+        "log_syncs": 12805,
+        "log_sync_entries": 12805,
+        "hardstate_syncs": 0,
+        "append_messages_total": 19168,
+        "append_messages_by_origin": {
+          "ack_resend": 97,
+          "commit_advance": 8537,
+          "heartbeat": 1996,
+          "other": 0,
+          "proposal": 8538
+        },
+        "apply_seconds": 0.4114605950000013,
+        "apply_count": 12806,
+        "snapshot_seconds": 0,
+        "snapshot_count": 0,
+        "log_syncs_per_committed_entry": 2.9995315062075427,
+        "entries_per_log_sync": 1,
+        "append_messages_per_committed_entry": 4.490044506910284,
+        "append_messages_per_committed_entry_by_origin": {
+          "ack_resend": 0.022721948934176624,
+          "commit_advance": 1.9997657531037714,
+          "heartbeat": 0.4675568048723354,
+          "other": 0,
+          "proposal": 2
+        },
+        "send_failures_deadline": 0,
+        "send_failures_other": 0
+      }
+    },
+    {
+      "repetition": 2,
+      "clients": 1,
+      "valid": true,
+      "window_seconds": 20.001762491,
+      "ops_ok": 4665,
+      "ops_failed": 0,
+      "retries": 0,
+      "throughput_ops_per_sec": 233.2294467599575,
+      "latency_ms": {
+        "p50": 4.203129,
+        "p95": 4.978457,
+        "p99": 5.6543,
+        "p99_9": 9.3656,
+        "max": 63.107754
+      },
+      "terms_start": [
+        1,
+        1,
+        1
+      ],
+      "terms_end": [
+        1,
+        1,
+        1
+      ],
+      "elections_in_window": 0,
+      "committed_entries": 4665,
+      "fsync_before": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.715451,
+        "p99_ms": 2.124108
+      },
+      "fsync_after": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.727683,
+        "p99_ms": 2.268947
+      },
+      "counters": {
+        "log_syncs": 13995,
+        "log_sync_entries": 13995,
+        "hardstate_syncs": 0,
+        "append_messages_total": 20785,
+        "append_messages_by_origin": {
+          "ack_resend": 129,
+          "commit_advance": 9330,
+          "heartbeat": 1996,
+          "other": 0,
+          "proposal": 9330
+        },
+        "apply_seconds": 0.40245741299999993,
+        "apply_count": 13995,
+        "snapshot_seconds": 0,
+        "snapshot_count": 0,
+        "log_syncs_per_committed_entry": 3,
+        "entries_per_log_sync": 1,
+        "append_messages_per_committed_entry": 4.455519828510182,
+        "append_messages_per_committed_entry_by_origin": {
+          "ack_resend": 0.02765273311897106,
+          "commit_advance": 2,
+          "heartbeat": 0.42786709539121115,
+          "other": 0,
+          "proposal": 2
+        },
+        "send_failures_deadline": 0,
+        "send_failures_other": 0
+      }
+    },
+    {
+      "repetition": 3,
+      "clients": 1,
+      "valid": true,
+      "window_seconds": 20.002642216,
+      "ops_ok": 4579,
+      "ops_failed": 0,
+      "retries": 0,
+      "throughput_ops_per_sec": 228.91975722773682,
+      "latency_ms": {
+        "p50": 4.286095,
+        "p95": 5.115627,
+        "p99": 5.785741,
+        "p99_9": 9.004382,
+        "max": 55.288372
+      },
+      "terms_start": [
+        1,
+        1,
+        1
+      ],
+      "terms_end": [
+        1,
+        1,
+        1
+      ],
+      "elections_in_window": 0,
+      "committed_entries": 4579,
+      "fsync_before": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.632586,
+        "p99_ms": 2.063688
+      },
+      "fsync_after": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.686569,
+        "p99_ms": 2.30992
+      },
+      "counters": {
+        "log_syncs": 13737,
+        "log_sync_entries": 13737,
+        "hardstate_syncs": 0,
+        "append_messages_total": 20442,
+        "append_messages_by_origin": {
+          "ack_resend": 129,
+          "commit_advance": 9157,
+          "heartbeat": 1998,
+          "other": 0,
+          "proposal": 9158
+        },
+        "apply_seconds": 0.3945443189999991,
+        "apply_count": 13737,
+        "snapshot_seconds": 0,
+        "snapshot_count": 0,
+        "log_syncs_per_committed_entry": 3,
+        "entries_per_log_sync": 1,
+        "append_messages_per_committed_entry": 4.4642935138676565,
+        "append_messages_per_committed_entry_by_origin": {
+          "ack_resend": 0.028172089975977286,
+          "commit_advance": 1.9997816117056126,
+          "heartbeat": 0.4363398121860668,
+          "other": 0,
+          "proposal": 2
+        },
+        "send_failures_deadline": 0,
+        "send_failures_other": 0
+      }
+    },
+    {
+      "repetition": 4,
+      "clients": 1,
+      "valid": true,
+      "window_seconds": 20.00072006,
+      "ops_ok": 4623,
+      "ops_failed": 0,
+      "retries": 0,
+      "throughput_ops_per_sec": 231.14167820615955,
+      "latency_ms": {
+        "p50": 4.241013,
+        "p95": 5.045697,
+        "p99": 5.758056,
+        "p99_9": 9.314169,
+        "max": 59.050645
+      },
+      "terms_start": [
+        1,
+        1,
+        1
+      ],
+      "terms_end": [
+        1,
+        1,
+        1
+      ],
+      "elections_in_window": 0,
+      "committed_entries": 4623,
+      "fsync_before": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.679642,
+        "p99_ms": 2.269621
+      },
+      "fsync_after": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.736764,
+        "p99_ms": 2.25224
+      },
+      "counters": {
+        "log_syncs": 13869,
+        "log_sync_entries": 13869,
+        "hardstate_syncs": 0,
+        "append_messages_total": 20625,
+        "append_messages_by_origin": {
+          "ack_resend": 137,
+          "commit_advance": 9246,
+          "heartbeat": 1996,
+          "other": 0,
+          "proposal": 9246
+        },
+        "apply_seconds": 0.3897922880000003,
+        "apply_count": 13869,
+        "snapshot_seconds": 0,
+        "snapshot_count": 0,
+        "log_syncs_per_committed_entry": 3,
+        "entries_per_log_sync": 1,
+        "append_messages_per_committed_entry": 4.461388708630759,
+        "append_messages_per_committed_entry_by_origin": {
+          "ack_resend": 0.02963443651308674,
+          "commit_advance": 2,
+          "heartbeat": 0.43175427211767253,
+          "other": 0,
+          "proposal": 2
+        },
+        "send_failures_deadline": 0,
+        "send_failures_other": 0
+      }
+    },
+    {
+      "repetition": 5,
+      "clients": 1,
+      "valid": true,
+      "window_seconds": 20.001213387,
+      "ops_ok": 4633,
+      "ops_failed": 0,
+      "retries": 0,
+      "throughput_ops_per_sec": 231.63594679767115,
+      "latency_ms": {
+        "p50": 4.233357,
+        "p95": 5.012448,
+        "p99": 5.723345,
+        "p99_9": 8.855048,
+        "max": 60.152895
+      },
+      "terms_start": [
+        1,
+        1,
+        1
+      ],
+      "terms_end": [
+        1,
+        1,
+        1
+      ],
+      "elections_in_window": 0,
+      "committed_entries": 4633,
+      "fsync_before": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.739756,
+        "p99_ms": 2.370248
+      },
+      "fsync_after": {
+        "samples": 200,
+        "block_bytes": 4096,
+        "p50_ms": 1.640007,
+        "p99_ms": 2.036677
+      },
+      "counters": {
+        "log_syncs": 13899,
+        "log_sync_entries": 13899,
+        "hardstate_syncs": 0,
+        "append_messages_total": 20659,
+        "append_messages_by_origin": {
+          "ack_resend": 131,
+          "commit_advance": 9266,
+          "heartbeat": 1996,
+          "other": 0,
+          "proposal": 9266
+        },
+        "apply_seconds": 0.3917558510000001,
+        "apply_count": 13899,
+        "snapshot_seconds": 0,
+        "snapshot_count": 0,
+        "log_syncs_per_committed_entry": 3,
+        "entries_per_log_sync": 1,
+        "append_messages_per_committed_entry": 4.459097776818476,
+        "append_messages_per_committed_entry_by_origin": {
+          "ack_resend": 0.028275415497517806,
+          "commit_advance": 2,
+          "heartbeat": 0.43082236132095836,
+          "other": 0,
+          "proposal": 2
+        },
+        "send_failures_deadline": 0,
+        "send_failures_other": 0
+      }
+    }
+  ],
+  "summary": [
+    {
+      "clients": 1,
+      "valid_runs": 5,
+      "invalid_runs": 0,
+      "throughput_ops_per_sec": {
+        "median": 231.14167820615955,
+        "min": 213.44317991410514,
+        "max": 233.2294467599575
+      },
+      "p50_ms": {
+        "median": 4.241013,
+        "min": 4.203129,
+        "max": 4.60891
+      },
+      "p99_ms": {
+        "median": 5.758056,
+        "min": 5.6543,
+        "max": 6.024015
+      }
+    }
+  ]
+}

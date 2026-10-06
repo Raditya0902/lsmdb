@@ -21,7 +21,7 @@ const (
 	snapshotFile    = "SNAPSHOT"
 	logFile         = "raft.log"
 	entryHeader     = 8 + 8 + 4
-	maxEntryData    = 4 << 20
+	maxEntryData    = raft.MaxEntryBytes
 	maxSnapshotData = uint64(64 << 30)
 	snapshotHeader  = 8 + 8 + 8
 )

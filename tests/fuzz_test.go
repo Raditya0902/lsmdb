@@ -3,6 +3,7 @@ package tests
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"testing"
 
 	"lsmdb/db"
@@ -132,6 +133,96 @@ func TestPropertyCompactionIsIdempotent(t *testing.T) {
 	for _, k := range deleted {
 		if _, ok := d.Get(k); ok {
 			t.Errorf("deleted key %q found after double compaction", k)
+		}
+	}
+}
+
+// TestPropertyRandomOpsWithReopen compares the engine with a reference map while
+// interleaving writes, deletes, flushes, compactions, and reopens. Reopening after
+// a flush is what exposed sequence-number reuse, so every seed exercises it.
+// Every flush syncs files, so the default run is short; LSMDB_LONG_TESTS=1 runs
+// the long version and -short skips the test.
+func TestPropertyRandomOpsWithReopen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("fsync-heavy property test; skipped under -short")
+	}
+	const numKeys = 16
+	numOps := 500
+	if os.Getenv("LSMDB_LONG_TESTS") == "1" {
+		numOps = 5000
+	}
+	opts := &db.Options{FlushThreshold: 32, CompactionThreshold: 3}
+	keys := make([]string, numKeys)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("key%02d", i)
+	}
+
+	for seed := int64(1); seed <= 4; seed++ {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			dir := t.TempDir()
+			d, err := db.Open(dir, opts)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = d.Close() }()
+			ref := make(map[string]string)
+			rng := rand.New(rand.NewSource(seed))
+
+			for step := 0; step < numOps; step++ {
+				k := keys[rng.Intn(numKeys)]
+				switch roll := rng.Intn(100); {
+				case roll < 60:
+					val := fmt.Sprintf("s%d-v%d", seed, step)
+					if err := d.Set(k, []byte(val)); err != nil {
+						t.Fatalf("step %d Set(%s): %v", step, k, err)
+					}
+					ref[k] = val
+				case roll < 80:
+					if err := d.Delete(k); err != nil {
+						t.Fatalf("step %d Delete(%s): %v", step, k, err)
+					}
+					delete(ref, k)
+				case roll < 88:
+					if err := d.ForceFlush(); err != nil {
+						t.Fatalf("step %d ForceFlush: %v", step, err)
+					}
+				case roll < 94:
+					if err := d.ForceCompact(); err != nil {
+						t.Fatalf("step %d ForceCompact: %v", step, err)
+					}
+				default:
+					if err := d.Close(); err != nil {
+						t.Fatalf("step %d Close: %v", step, err)
+					}
+					if d, err = db.Open(dir, opts); err != nil {
+						t.Fatalf("step %d reopen: %v", step, err)
+					}
+				}
+				assertMatchesModel(t, d, ref, keys, step)
+			}
+		})
+	}
+}
+
+func assertMatchesModel(t *testing.T, d *db.DB, ref map[string]string, keys []string, step int) {
+	t.Helper()
+	for _, k := range keys {
+		got, ok := d.Get(k)
+		want, exists := ref[k]
+		if ok != exists || string(got) != want {
+			t.Fatalf("step %d Get(%s) = (%q, %v), want (%q, %v)", step, k, got, ok, want, exists)
+		}
+	}
+	pairs, err := d.Scan(keys[0], keys[len(keys)-1])
+	if err != nil {
+		t.Fatalf("step %d Scan: %v", step, err)
+	}
+	if len(pairs) != len(ref) {
+		t.Fatalf("step %d Scan returned %d pairs, want %d", step, len(pairs), len(ref))
+	}
+	for _, pair := range pairs {
+		if want := ref[pair.Key]; string(pair.Value) != want {
+			t.Fatalf("step %d Scan[%s] = %q, want %q", step, pair.Key, pair.Value, want)
 		}
 	}
 }

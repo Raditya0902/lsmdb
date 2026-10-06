@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -44,8 +46,18 @@ type Config struct {
 	SnapshotThreshold uint64
 }
 
+// Batch caps (D022). A proposal counts as its data plus
+// raft.EntryOverheadBytes, as in the append cap, so a full batch fits one
+// capped append; a proposal over raft.MaxEntryBytes counts nothing, because it
+// is rejected on its own.
+const (
+	maxBatchEntries = 256
+	maxBatchBytes   = 1 << 20
+)
+
 type proposalResult struct {
 	index uint64
+	term  uint64
 	err   error
 }
 
@@ -75,9 +87,25 @@ type readResult struct {
 }
 
 type pendingProposal struct{ result chan proposalResult }
+
+// pendingMembership waits for a voter set to become the committed configuration.
+// Its final entry's index cannot be predicted: client proposals accepted while the
+// joint configuration is uncommitted are appended before it.
+type pendingMembership struct {
+	voters []uint64
+	result chan proposalResult
+}
+
+// pendingRead is one read probe and every read waiting on it (D022).
 type pendingRead struct {
-	result chan readResult
-	acks   map[uint64]struct{}
+	results []chan readResult
+	acks    map[uint64]struct{}
+}
+
+func (read pendingRead) complete(result readResult) {
+	for _, waiter := range read.results {
+		waiter <- result
+	}
 }
 
 // Runtime serializes all access to a Raft Node in one event loop.
@@ -91,6 +119,8 @@ type Runtime struct {
 	done              chan struct{}
 	snapshotThreshold uint64
 	once              sync.Once
+	// membership is owned by the event loop; at most one change runs at a time.
+	membership *pendingMembership
 }
 
 // Start begins a runtime. The supplied node must have been restored using the
@@ -116,24 +146,25 @@ func Start(cfg Config, node *raft.Node, store StableStore, transport Transport, 
 	return runtime, nil
 }
 
-// Propose waits until a command is committed and locally applied.
-func (r *Runtime) Propose(ctx context.Context, command []byte) (uint64, error) {
+// Propose waits until a command is committed and locally applied. It returns
+// the command's log index and the term of the entry at that index.
+func (r *Runtime) Propose(ctx context.Context, command []byte) (index, term uint64, err error) {
 	result := make(chan proposalResult, 1)
 	event := proposalEvent{data: append([]byte(nil), command...), result: result}
 	select {
 	case r.events <- event:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, 0, ctx.Err()
 	case <-r.done:
-		return 0, raft.ErrStopped
+		return 0, 0, raft.ErrStopped
 	}
 	select {
 	case response := <-result:
-		return response.index, response.err
+		return response.index, response.term, response.err
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, 0, ctx.Err()
 	case <-r.done:
-		return 0, raft.ErrStopped
+		return 0, 0, raft.ErrStopped
 	}
 }
 
@@ -248,13 +279,23 @@ func (r *Runtime) LinearizableRead(ctx context.Context) (uint64, error) {
 }
 
 // Close stops the runtime after closing the state machine and stable store.
+// It returns nil if the runtime had already stopped itself.
 func (r *Runtime) Close() error {
 	var err error
 	r.once.Do(func() {
 		result := make(chan error, 1)
 		select {
 		case r.events <- stopEvent{result: result}:
-			err = <-result
+			// The event queue can accept the stop event after the loop has
+			// already stopped itself, and then nothing answers it.
+			select {
+			case err = <-result:
+			case <-r.done:
+				select {
+				case err = <-result:
+				default:
+				}
+			}
 		case <-r.done:
 			err = nil
 		}
@@ -268,80 +309,284 @@ func (r *Runtime) run(tickInterval time.Duration) {
 	pending := make(map[uint64]pendingProposal)
 	pendingReads := make(map[uint64]pendingRead)
 	var nextReadContext uint64
+	// deferred holds events read while draining a batch, handled in arrival
+	// order before the queue is read again (D022).
+	var deferred []any
 	for {
-		select {
-		case <-ticker.C:
-			if err := r.processUpdate(r.node.Tick(), pending, pendingReads); err != nil {
+		var raw any
+		if len(deferred) > 0 {
+			raw, deferred = deferred[0], deferred[1:]
+		} else {
+			select {
+			case <-ticker.C:
+				if err := r.processUpdate(r.node.Tick(), pending, pendingReads); err != nil {
+					r.fail(err, pending, pendingReads)
+					return
+				}
+				continue
+			case raw = <-r.events:
+			}
+		}
+		switch event := raw.(type) {
+		case proposalEvent:
+			batch := []proposalEvent{event}
+			if len(deferred) == 0 {
+				batch, deferred = r.drainProposals(event)
+			}
+			if err := r.proposeBatch(batch, pending, pendingReads); err != nil {
 				r.fail(err, pending, pendingReads)
 				return
 			}
-		case raw := <-r.events:
-			switch event := raw.(type) {
-			case proposalEvent:
-				index, update, err := r.node.Propose(event.data)
-				if err != nil {
-					event.result <- proposalResult{err: err}
-					continue
-				}
-				pending[index] = pendingProposal{result: event.result}
-				if err := r.processUpdate(update, pending, pendingReads); err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-			case membershipEvent:
-				index, update, err := r.node.ProposeMembership(event.voters)
-				if err != nil {
-					event.result <- proposalResult{err: err}
-					continue
-				}
-				if index <= r.node.Status().CommitIndex {
-					event.result <- proposalResult{index: index}
-					continue
-				}
-				pending[index] = pendingProposal{result: event.result}
-				if err := r.processUpdate(update, pending, pendingReads); err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-			case messageEvent:
-				err := r.processUpdateWithSnapshot(r.node.Step(event.message), event.snapshotData, pending, pendingReads)
-				if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
-					r.acknowledgeRead(event.message, pendingReads)
-				}
-				event.result <- err
-				if err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-			case statusEvent:
-				event.result <- r.node.Status()
-			case readEvent:
-				nextReadContext++
-				contextID := nextReadContext
-				update, err := r.node.ReadProbe(contextID)
-				if err != nil {
-					event.result <- readResult{err: err}
-					continue
-				}
-				pendingReads[contextID] = pendingRead{
-					result: event.result, acks: map[uint64]struct{}{r.node.Status().ID: {}},
-				}
-				if err := r.processUpdate(update, pending, pendingReads); err != nil {
-					r.fail(err, pending, pendingReads)
-					return
-				}
-				if r.node.HasQuorum(map[uint64]struct{}{r.node.Status().ID: {}}) {
-					event.result <- readResult{index: r.node.Status().CommitIndex}
-					delete(pendingReads, contextID)
-				}
-			case stopEvent:
-				err := r.closeResources()
-				event.result <- err
-				close(r.done)
-				close(r.outgoing)
+		case membershipEvent:
+			index, update, err := r.node.ProposeMembership(event.voters)
+			if err != nil {
+				event.result <- proposalResult{err: err}
+				continue
+			}
+			if index <= r.node.Status().CommitIndex {
+				event.result <- proposalResult{index: index}
+				continue
+			}
+			r.membership = &pendingMembership{voters: event.voters, result: event.result}
+			if err := r.processUpdate(update, pending, pendingReads); err != nil {
+				r.fail(err, pending, pendingReads)
 				return
 			}
+		case messageEvent:
+			if event.message.Type == raft.MsgAppend && event.snapshotData == nil && len(deferred) == 0 {
+				var group []messageEvent
+				group, deferred = r.drainAppends(event)
+				if err := r.stepAppends(group, pending, pendingReads); err != nil {
+					r.fail(err, pending, pendingReads)
+					return
+				}
+				continue
+			}
+			err := r.processUpdateWithSnapshot(r.node.Step(event.message), event.snapshotData, pending, pendingReads)
+			if err == nil && event.message.Type == raft.MsgAppendResponse && !event.message.Reject && event.message.Context != 0 {
+				r.acknowledgeRead(event.message, pendingReads)
+			}
+			event.result <- err
+			if err != nil {
+				r.fail(err, pending, pendingReads)
+				return
+			}
+		case statusEvent:
+			event.result <- r.node.Status()
+		case readEvent:
+			var reads []readEvent
+			reads, deferred = r.collectReads(event, deferred)
+			read := pendingRead{acks: map[uint64]struct{}{r.node.Status().ID: {}}}
+			for _, queued := range reads {
+				read.results = append(read.results, queued.result)
+			}
+			nextReadContext++
+			contextID := nextReadContext
+			update, err := r.node.ReadProbe(contextID)
+			if err != nil {
+				read.complete(readResult{err: err})
+				continue
+			}
+			pendingReads[contextID] = read
+			if err := r.processUpdate(update, pending, pendingReads); err != nil {
+				r.fail(err, pending, pendingReads)
+				return
+			}
+			if r.node.HasQuorum(read.acks) {
+				read.complete(readResult{index: r.node.Status().CommitIndex})
+				delete(pendingReads, contextID)
+			}
+		case stopEvent:
+			err := r.closeResources()
+			event.result <- err
+			close(r.done)
+			close(r.outgoing)
+			return
 		}
+	}
+}
+
+// drainProposals reads queued events without blocking and gathers proposals
+// behind first into one batch, up to maxBatchEntries proposals, maxBatchBytes
+// accounted bytes or a queue's worth of events. Other events, and a proposal
+// that would overflow the byte cap, are returned in arrival order.
+func (r *Runtime) drainProposals(first proposalEvent) (batch []proposalEvent, others []any) {
+	batch = []proposalEvent{first}
+	size := proposalBytes(first)
+	for drained := 0; drained < cap(r.events) && len(batch) < maxBatchEntries && size < maxBatchBytes; drained++ {
+		var raw any
+		select {
+		case raw = <-r.events:
+		default:
+			return batch, others
+		}
+		next, ok := raw.(proposalEvent)
+		if !ok {
+			others = append(others, raw)
+			continue
+		}
+		if size+proposalBytes(next) > maxBatchBytes {
+			return batch, append(others, raw)
+		}
+		batch = append(batch, next)
+		size += proposalBytes(next)
+	}
+	return batch, others
+}
+
+func proposalBytes(event proposalEvent) int {
+	if len(event.data) > raft.MaxEntryBytes {
+		return 0
+	}
+	return len(event.data) + raft.EntryOverheadBytes
+}
+
+// proposeBatch appends a batch with one ProposeBatch and persists it with one
+// update. Each proposal waits at its own index; one too large to append, or a
+// batch proposed on a non-leader, is answered at once.
+func (r *Runtime) proposeBatch(batch []proposalEvent, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
+	data := make([][]byte, len(batch))
+	for i, event := range batch {
+		data[i] = event.data
+	}
+	indexes, update, err := r.node.ProposeBatch(data)
+	if err != nil {
+		for _, event := range batch {
+			event.result <- proposalResult{err: err}
+		}
+		return nil
+	}
+	for i, event := range batch {
+		if indexes[i] == 0 {
+			event.result <- proposalResult{err: raft.ErrEntryTooLarge}
+			continue
+		}
+		pending[indexes[i]] = pendingProposal{result: event.result}
+	}
+	if len(update.Entries) == 0 {
+		return nil
+	}
+	return r.processUpdate(update, pending, pendingReads)
+}
+
+// collectReads gathers the reads that share first's probe (D022): the reads
+// at the head of deferred when it is not empty, otherwise every read queued
+// now. Other events drained from the queue are returned in arrival order.
+func (r *Runtime) collectReads(first readEvent, deferred []any) ([]readEvent, []any) {
+	reads := []readEvent{first}
+	if len(deferred) > 0 {
+		for len(deferred) > 0 {
+			next, ok := deferred[0].(readEvent)
+			if !ok {
+				break
+			}
+			reads, deferred = append(reads, next), deferred[1:]
+		}
+		return reads, deferred
+	}
+	for drained := 0; drained < cap(r.events); drained++ {
+		select {
+		case raw := <-r.events:
+			if next, ok := raw.(readEvent); ok {
+				reads = append(reads, next)
+			} else {
+				deferred = append(deferred, raw)
+			}
+		default:
+			return reads, deferred
+		}
+	}
+	return reads, deferred
+}
+
+// drainAppends reads queued events without blocking and gathers appends from
+// first's sender into one group, up to maxBatchEntries entries, maxBatchBytes
+// accounted bytes or a queue's worth of events; the caps bound one persist,
+// since each append is already capped by its leader. Other events, and an
+// append that would overflow a cap, are returned in arrival order.
+func (r *Runtime) drainAppends(first messageEvent) (group []messageEvent, others []any) {
+	group = []messageEvent{first}
+	entries, size := appendLoad(first.message)
+	for drained := 0; drained < cap(r.events) && entries < maxBatchEntries && size < maxBatchBytes; drained++ {
+		var raw any
+		select {
+		case raw = <-r.events:
+		default:
+			return group, others
+		}
+		next, ok := raw.(messageEvent)
+		if !ok || next.snapshotData != nil || next.message.Type != raft.MsgAppend || next.message.From != first.message.From {
+			others = append(others, raw)
+			continue
+		}
+		count, bytes := appendLoad(next.message)
+		if entries+count > maxBatchEntries || size+bytes > maxBatchBytes {
+			return group, append(others, raw)
+		}
+		group = append(group, next)
+		entries, size = entries+count, size+bytes
+	}
+	return group, others
+}
+
+func appendLoad(message raft.Message) (entries, bytes int) {
+	for _, entry := range message.Entries {
+		bytes += len(entry.Data) + raft.EntryOverheadBytes
+	}
+	return len(message.Entries), bytes
+}
+
+// stepAppends steps a group of appends and persists them together (D022).
+// Updates that only append, commit and answer are merged into one persist;
+// one that changes hard state, truncates, installs a snapshot or changes role
+// ends the merge: the merged prefix is persisted first, then that update
+// alone. Every RPC completes after the persist that covers it, with its
+// error if that persist failed.
+func (r *Runtime) stepAppends(group []messageEvent, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) error {
+	var merged raft.Update
+	var waiting []chan error
+	flush := func() error {
+		if len(waiting) == 0 {
+			return nil
+		}
+		err := r.processUpdate(merged, pending, pendingReads)
+		for _, result := range waiting {
+			result <- err
+		}
+		merged, waiting = raft.Update{}, nil
+		return err
+	}
+	failRest := func(rest []messageEvent, err error) error {
+		for _, event := range rest {
+			event.result <- err
+		}
+		return err
+	}
+	for i, event := range group {
+		update := r.node.Step(event.message)
+		if update.HardState == nil && update.TruncateFrom == 0 && update.Snapshot == nil && !update.RoleChanged {
+			logDroppedAppend(update.DroppedAppend)
+			merged.Entries = append(merged.Entries, update.Entries...)
+			merged.Messages = append(merged.Messages, update.Messages...)
+			merged.Committed = append(merged.Committed, update.Committed...)
+			waiting = append(waiting, event.result)
+			continue
+		}
+		if err := flush(); err != nil {
+			return failRest(group[i:], err)
+		}
+		err := r.processUpdate(update, pending, pendingReads)
+		event.result <- err
+		if err != nil {
+			return failRest(group[i+1:], err)
+		}
+	}
+	return flush()
+}
+
+func logDroppedAppend(reason string) {
+	if reason != "" {
+		log.Printf("raft: dropped malformed append %s", reason)
 	}
 }
 
@@ -362,6 +607,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 	if err != nil {
 		return fmt.Errorf("persist raft update: %w", err)
 	}
+	logDroppedAppend(update.DroppedAppend)
 	if update.Snapshot != nil && r.machine.AppliedIndex() < update.Snapshot.Index {
 		reader, size, _, err := r.store.OpenSnapshot(update.Snapshot.Index)
 		if err != nil {
@@ -386,7 +632,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 	for _, entry := range update.Committed {
 		if entry.Index <= r.machine.AppliedIndex() {
 			if waiter, ok := pending[entry.Index]; ok {
-				waiter.result <- proposalResult{index: entry.Index}
+				waiter.result <- proposalResult{index: entry.Index, term: entry.Term}
 				delete(pending, entry.Index)
 			}
 			continue
@@ -406,7 +652,7 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 			return fmt.Errorf("apply committed entry %d: %w", entry.Index, err)
 		}
 		if waiter, ok := pending[entry.Index]; ok {
-			waiter.result <- proposalResult{index: entry.Index}
+			waiter.result <- proposalResult{index: entry.Index, term: entry.Term}
 			delete(pending, entry.Index)
 		}
 	}
@@ -432,17 +678,52 @@ func (r *Runtime) processUpdateWithSnapshot(update raft.Update, snapshotData io.
 			}
 		}
 	}
+	r.resolveMembership()
 	if update.RoleChanged && r.node.Status().Role != raft.Leader {
+		if r.membership != nil {
+			r.membership.result <- proposalResult{err: raft.ErrNotLeader}
+			r.membership = nil
+		}
 		for index, waiter := range pending {
 			waiter.result <- proposalResult{index: index, err: raft.ErrNotLeader}
 			delete(pending, index)
 		}
 		for contextID, read := range pendingReads {
-			read.result <- readResult{err: raft.ErrNotLeader}
+			read.complete(readResult{err: raft.ErrNotLeader})
 			delete(pendingReads, contextID)
 		}
 	}
 	return nil
+}
+
+// resolveMembership completes a pending ChangeMembership once its voter set is the
+// applied, non-joint configuration, returning that configuration's log index.
+func (r *Runtime) resolveMembership() {
+	if r.membership == nil {
+		return
+	}
+	current := r.node.Status().Membership
+	if len(current.JointVoters) != 0 || current.Index > r.machine.AppliedIndex() || !sameVoters(current.Voters, r.membership.voters) {
+		return
+	}
+	r.membership.result <- proposalResult{index: current.Index}
+	r.membership = nil
+}
+
+func sameVoters(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sortedA := append([]uint64(nil), a...)
+	sortedB := append([]uint64(nil), b...)
+	sort.Slice(sortedA, func(i, j int) bool { return sortedA[i] < sortedA[j] })
+	sort.Slice(sortedB, func(i, j int) bool { return sortedB[i] < sortedB[j] })
+	for i := range sortedA {
+		if sortedA[i] != sortedB[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runtime) acknowledgeRead(message raft.Message, pendingReads map[uint64]pendingRead) {
@@ -459,7 +740,7 @@ func (r *Runtime) acknowledgeRead(message raft.Message, pendingReads map[uint64]
 	if r.machine.AppliedIndex() < index {
 		return
 	}
-	read.result <- readResult{index: index}
+	read.complete(readResult{index: index})
 	delete(pendingReads, message.Context)
 }
 
@@ -495,11 +776,15 @@ func (r *Runtime) sendLoop() {
 }
 
 func (r *Runtime) fail(cause error, pending map[uint64]pendingProposal, pendingReads map[uint64]pendingRead) {
+	if r.membership != nil {
+		r.membership.result <- proposalResult{err: cause}
+		r.membership = nil
+	}
 	for index, waiter := range pending {
 		waiter.result <- proposalResult{index: index, err: cause}
 	}
 	for contextID, read := range pendingReads {
-		read.result <- readResult{err: cause}
+		read.complete(readResult{err: cause})
 		delete(pendingReads, contextID)
 	}
 	_ = r.closeResources()

@@ -81,6 +81,40 @@ type Message struct {
 	RejectHint   uint64
 	Context      uint64
 	Snapshot     *Snapshot
+	// Origin records which code path emitted an append, for instrumentation
+	// only. It is never serialized and consensus logic never reads it.
+	Origin MessageOrigin
+}
+
+// MessageOrigin labels the code path that emitted an append message.
+type MessageOrigin uint8
+
+const (
+	// OriginOther covers elections, read probes, membership, and snapshot replies.
+	OriginOther MessageOrigin = iota
+	// OriginHeartbeat is the periodic leader broadcast from Tick.
+	OriginHeartbeat
+	// OriginProposal is the broadcast that follows a client proposal.
+	OriginProposal
+	// OriginCommitAdvance is the broadcast made when the leader's commit index advances.
+	OriginCommitAdvance
+	// OriginAckResend is any append sent directly in reply to an append response.
+	OriginAckResend
+)
+
+func (o MessageOrigin) String() string {
+	switch o {
+	case OriginHeartbeat:
+		return "heartbeat"
+	case OriginProposal:
+		return "proposal"
+	case OriginCommitAdvance:
+		return "commit_advance"
+	case OriginAckResend:
+		return "ack_resend"
+	default:
+		return "other"
+	}
 }
 
 // Update describes effects produced by one deterministic state transition.
@@ -93,6 +127,9 @@ type Update struct {
 	Committed    []Entry
 	RoleChanged  bool
 	Snapshot     *Snapshot
+	// DroppedAppend says why a malformed append was dropped. It is empty
+	// otherwise; a dropped append has no other effect.
+	DroppedAppend string
 }
 
 func (u *Update) merge(other Update) {
@@ -111,6 +148,9 @@ func (u *Update) merge(other Update) {
 		copy := cloneSnapshot(*other.Snapshot)
 		u.Snapshot = &copy
 	}
+	if other.DroppedAppend != "" {
+		u.DroppedAppend = other.DroppedAppend
+	}
 }
 
 // Config controls logical tick timing and the immutable bootstrap voter set.
@@ -125,6 +165,10 @@ type Config struct {
 	RandomSeed       uint64
 	// AppliedIndex is a commit watermark derived from a durable state machine on restart.
 	AppliedIndex uint64
+	// maxAppendBytes overrides the per-message entry cap; tests only (D019).
+	maxAppendBytes uint64
+	// inflightResendTicks overrides the resend timeout; tests only (D022).
+	inflightResendTicks int
 }
 
 func (c Config) validate() error {
@@ -169,6 +213,12 @@ type Status struct {
 	VotedFor           uint64
 	MatchIndex         map[uint64]uint64
 	Membership         Membership
+	// MalformedAppendsDropped counts appends dropped since start because
+	// their entries could not have come from a correct leader.
+	MalformedAppendsDropped uint64
+	// VotesIgnoredInLease counts vote requests at a higher term ignored
+	// since start because this node was in its vote lease (D021).
+	VotesIgnoredInLease uint64
 }
 
 var (
@@ -182,6 +232,27 @@ var (
 	ErrMembershipChangeInProgress = errors.New("raft membership change is already in progress")
 	// ErrNoMembershipChange means the requested voter set is already active.
 	ErrNoMembershipChange = errors.New("requested raft membership is already active")
+	// ErrEntryTooLarge rejects a proposal whose data exceeds MaxEntryBytes.
+	ErrEntryTooLarge = fmt.Errorf("raft entry data exceeds %d bytes", MaxEntryBytes)
+)
+
+// Entry and message size bounds (D019). The core imports no protobuf; the
+// transport adapter's tests check these bounds against encoded sizes.
+const (
+	// MaxEntryBytes bounds one entry's data. It covers a key-value command with a
+	// 4 MiB value and a 16 KiB key, and the stores use the same limit.
+	MaxEntryBytes = 4<<20 + 32<<10
+	// EntryOverheadBytes bounds one entry's framing inside an append message.
+	EntryOverheadBytes = 32
+	// MessageEnvelopeBytes bounds an append message's fields other than entries.
+	MessageEnvelopeBytes = 121
+	// defaultMaxAppendBytes caps the accounted entry bytes in one append.
+	defaultMaxAppendBytes = 1 << 20
+	// defaultInflightResendTicks is how many leader ticks an entry-carrying
+	// append stays outstanding without a response before it is sent again
+	// (D022). With 20 ms ticks and the runtime's 500 ms send deadline, at most
+	// five copies of a chunk are in flight to one follower.
+	defaultInflightResendTicks = 5
 )
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {

@@ -159,6 +159,52 @@ func TestFollowerNeverTruncatesCommittedEntry(t *testing.T) {
 	}
 }
 
+func TestFollowerDoesNotCommitUnverifiedStaleSuffix(t *testing.T) {
+	// Entry 3 is a stale suffix from an older leader; the current leader has only
+	// proved that the log matches through index 2.
+	node, err := New(testConfig(2), HardState{Term: 2}, []Entry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+		{Index: 3, Term: 1, Data: []byte("stale")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := node.Step(Message{
+		Type: MsgAppend, From: 1, To: 2, Term: 2, LogIndex: 2, LogTerm: 1, LeaderCommit: 3,
+	})
+	if got := node.Status().CommitIndex; got != 2 {
+		t.Fatalf("commit = %d, want 2", got)
+	}
+	for _, entry := range update.Committed {
+		if entry.Index > 2 {
+			t.Fatalf("committed unverified entry %d (%q)", entry.Index, entry.Data)
+		}
+	}
+}
+
+func TestFollowerCommitNeverMovesBackwardOnDelayedAppend(t *testing.T) {
+	node, err := New(testConfig(2), HardState{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []Entry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
+	node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 1, Entries: entries, LeaderCommit: 2})
+	if got := node.Status().CommitIndex; got != 2 {
+		t.Fatalf("commit after newer append = %d, want 2", got)
+	}
+	// A delayed append verifies only index 1 but carries a higher leader commit.
+	delayed := node.Step(Message{Type: MsgAppend, From: 1, To: 2, Term: 1, Entries: entries[:1], LeaderCommit: 3})
+	if got := node.Status().CommitIndex; got < 2 {
+		t.Fatalf("commit moved backward to %d", got)
+	}
+	for _, entry := range delayed.Committed {
+		if entry.Index <= 2 {
+			t.Fatalf("re-emitted committed entry %d", entry.Index)
+		}
+	}
+}
+
 func TestFollowerRejectsMalformedMembershipWithoutMutatingLog(t *testing.T) {
 	node, err := New(testConfig(2), HardState{Term: 2}, nil)
 	if err != nil {
@@ -325,6 +371,11 @@ func TestJointConsensusRequiresOldAndNewMajorities(t *testing.T) {
 	if leader.Status().CommitIndex != 3 {
 		t.Fatalf("final configuration did not commit: %+v", leader.Status())
 	}
+	// Node 3 never received the joint entry; the leader re-sends it once that
+	// append has been outstanding for the resend timeout (D022).
+	for tick := 0; tick < testResendTicks; tick++ {
+		deliverAll(t, nodes, leader.Tick().Messages)
+	}
 	for id, node := range nodes {
 		if !equalVoters(node.Status().Membership.Voters, []uint64{1, 2, 3, 4}) {
 			t.Fatalf("node %d membership = %+v", id, node.Status().Membership)
@@ -399,5 +450,156 @@ func TestJointConfigurationControlsElectionAndReadQuorums(t *testing.T) {
 	}
 	if !node.HasQuorum(map[uint64]struct{}{1: {}, 2: {}, 4: {}}) {
 		t.Fatal("old and new majorities did not satisfy joint quorum")
+	}
+}
+
+// runPreVoteTwoNodes runs node 1 (term aTerm, log [1]) and node 2 (term 1, log
+// [1..3]) with node 3 down, delivering every message, until a leader appears.
+func runPreVoteTwoNodes(t *testing.T, aTerm uint64) (*Node, *Node) {
+	t.Helper()
+	a, err := New(testConfig(1), HardState{Term: aTerm}, []Entry{{Index: 1, Term: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(testConfig(2), HardState{Term: 1}, []Entry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := map[uint64]*Node{1: a, 2: b}
+	var queue []Message
+	for tick := 0; tick < 2000 && a.Status().Role != Leader && b.Status().Role != Leader; tick++ {
+		for _, node := range []*Node{a, b} {
+			queue = append(queue, node.Tick().Messages...)
+		}
+		for len(queue) > 0 {
+			message := queue[0]
+			queue = queue[1:]
+			if node := nodes[message.To]; node != nil {
+				queue = append(queue, node.Step(message).Messages...)
+			}
+		}
+	}
+	return a, b
+}
+
+func TestPreVoteRejectionPropagatesHigherTerm(t *testing.T) {
+	// Node 1 holds the higher term but a stale log; node 2 holds the newer log.
+	a, b := runPreVoteTwoNodes(t, 2)
+	if b.Status().Role != Leader {
+		t.Fatalf("no leader after 2000 ticks: node1=%s/term %d, node2=%s/term %d",
+			a.Status().Role, a.Status().Term, b.Status().Role, b.Status().Term)
+	}
+	if b.Status().Term <= 2 {
+		t.Fatalf("leader term = %d, want above node 1's term 2", b.Status().Term)
+	}
+}
+
+func TestPreVoteControlElectsUpToDateNode(t *testing.T) {
+	a, b := runPreVoteTwoNodes(t, 1)
+	if b.Status().Role != Leader {
+		t.Fatalf("no leader: node1=%s/term %d, node2=%s/term %d",
+			a.Status().Role, a.Status().Term, b.Status().Role, b.Status().Term)
+	}
+}
+
+func TestRejectedPreVoteResponseWithHigherTermPersistsTerm(t *testing.T) {
+	node, err := New(testConfig(1), HardState{Term: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20 && node.Status().Role != PreCandidate; i++ {
+		node.Tick()
+	}
+	if node.Status().Role != PreCandidate {
+		t.Fatalf("role = %s, want pre-candidate", node.Status().Role)
+	}
+	update := node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: 5, Reject: true})
+	if status := node.Status(); status.Role != Follower || status.Term != 5 {
+		t.Fatalf("after higher-term rejection: role=%s term=%d, want follower at 5", status.Role, status.Term)
+	}
+	if update.HardState == nil || update.HardState.Term != 5 {
+		t.Fatalf("HardState = %+v, want term 5 persisted", update.HardState)
+	}
+}
+
+func TestPreVoteRequestDoesNotChangeReceiverTermOrDisruptLeader(t *testing.T) {
+	nodes := newTestCluster(t)
+	leader := electNodeOne(t, nodes)
+	term := leader.Status().Term
+	request := Message{Type: MsgPreVote, From: 2, To: 1, Term: term + 5, LogIndex: 100, LogTerm: term + 4}
+
+	update := leader.Step(request)
+	if status := leader.Status(); status.Role != Leader || status.Term != term || update.HardState != nil {
+		t.Fatalf("leader after pre-vote request: role=%s term=%d hard=%+v", status.Role, status.Term, update.HardState)
+	}
+	if len(update.Messages) != 1 || !update.Messages[0].Reject {
+		t.Fatalf("leader pre-vote response = %+v, want one rejection", update.Messages)
+	}
+
+	follower := nodes[3]
+	request.To = 3
+	update = follower.Step(request)
+	if status := follower.Status(); status.Term != term || status.Role != Follower || update.HardState != nil {
+		t.Fatalf("follower after pre-vote request: role=%s term=%d hard=%+v", status.Role, status.Term, update.HardState)
+	}
+}
+
+func newPreCandidate(t *testing.T, term uint64) *Node {
+	t.Helper()
+	node, err := New(testConfig(1), HardState{Term: term}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20 && node.Status().Role != PreCandidate; i++ {
+		node.Tick()
+	}
+	if node.Status().Role != PreCandidate {
+		t.Fatalf("role = %s, want pre-candidate", node.Status().Role)
+	}
+	return node
+}
+
+func TestPreVoteRejectionIsNeverCountedAsGrant(t *testing.T) {
+	// Node 1 at term 3 proposes term 4. One more grant would win a pre-vote among
+	// three voters, so counting any of these rejections as a grant starts an election.
+	cases := []struct {
+		name string
+		term uint64
+	}{
+		{name: "responder at the candidate's term", term: 3},
+		{name: "responder behind the candidate", term: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newPreCandidate(t, 3)
+			update := node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: tc.term, Reject: true})
+			status := node.Status()
+			if status.Role != PreCandidate || status.Term != 3 || update.HardState != nil {
+				t.Fatalf("after rejection at term %d: role=%s term=%d hard=%+v, want pre-candidate at 3",
+					tc.term, status.Role, status.Term, update.HardState)
+			}
+			if len(update.Messages) != 0 {
+				t.Fatalf("rejection produced messages %+v", update.Messages)
+			}
+		})
+	}
+}
+
+func TestAdoptedTermIsInUpdateBeforeAnyMessageAtThatTerm(t *testing.T) {
+	node := newPreCandidate(t, 1)
+	update := node.Step(Message{Type: MsgPreVoteResponse, From: 2, To: 1, Term: 5, Reject: true})
+	if update.HardState == nil || update.HardState.Term != 5 {
+		t.Fatalf("HardState = %+v, want term 5", update.HardState)
+	}
+	if len(update.Messages) != 0 {
+		t.Fatalf("adoption update sent %+v before its term was persisted", update.Messages)
+	}
+	// The next pre-vote is built on the adopted term and comes from a later update.
+	var next []Message
+	for i := 0; i < 20 && len(next) == 0; i++ {
+		next = node.Tick().Messages
+	}
+	if len(next) == 0 || next[0].Type != MsgPreVote || next[0].Term != 6 {
+		t.Fatalf("next messages = %+v, want pre-votes proposing term 6", next)
 	}
 }

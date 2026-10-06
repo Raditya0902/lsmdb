@@ -92,7 +92,7 @@ func (s *sqliteDB) batchSet(keys, values [][]byte) error {
 		}
 		for j := i; j < end; j++ {
 			if _, err := stmt.Exec(keys[j], values[j]); err != nil {
-				stmt.Close() //nolint:errcheck
+				stmt.Close()  //nolint:errcheck
 				tx.Rollback() //nolint:errcheck
 				return err
 			}
@@ -126,47 +126,43 @@ func (s *sqliteDB) scan(from, to []byte) ([]db.KVPair, error) {
 	return result, rows.Err()
 }
 
-// RunSQLite executes all workloads against SQLite.
-func RunSQLite(dir string) ([]WorkloadResult, error) {
-	results := make([]WorkloadResult, 0, 9)
+// sqliteWorkload returns per-op latencies and the wall time of its timed section.
+type sqliteWorkload func(*sqliteDB) ([]time.Duration, time.Duration, error)
 
-	for _, w := range []struct {
+// RunSQLite executes all workloads against SQLite, each on a fresh database.
+func RunSQLite(dir string) ([]WorkloadResult, error) {
+	type named struct {
 		name string
-		fn   func(*sqliteDB) ([]time.Duration, error)
-	}{
+		fn   sqliteWorkload
+	}
+	workloads := []named{
 		{"A: Sequential Writes", workloadASQLite},
 		{"B: Random Writes", workloadBSQLite},
 		{"C: Read-after-Write", workloadCSQLite},
 		{"D: Point Lookups", workloadDSQLite},
 		{"E: Update-Heavy", workloadESQLite},
 		{"F: Delete-Heavy", workloadFSQLite},
-	} {
+	}
+	for _, n := range []int{8, 16, 32} {
+		goroutines := n
+		workloads = append(workloads, named{fmt.Sprintf("G(%d): Concurrent Reads", n), func(d *sqliteDB) ([]time.Duration, time.Duration, error) {
+			return workloadGSQLite(d, goroutines)
+		}})
+	}
+	workloads = append(workloads, named{"H: Range Scans", workloadHSQLite})
+
+	results := make([]WorkloadResult, 0, len(workloads))
+	for _, w := range workloads {
 		wl, err := runSQLiteWorkload(dir, w.name, w.fn)
 		if err != nil {
 			return nil, fmt.Errorf("workload %s: %w", w.name, err)
 		}
 		results = append(results, wl)
 	}
-
-	for _, n := range []int{8, 16, 32} {
-		name := fmt.Sprintf("G(%d): Concurrent Reads", n)
-		wl, err := runSQLiteWorkloadG(dir, name, n)
-		if err != nil {
-			return nil, fmt.Errorf("workload %s: %w", name, err)
-		}
-		results = append(results, wl)
-	}
-
-	wl, err := runSQLiteWorkload(dir, "H: Range Scans", workloadHSQLite)
-	if err != nil {
-		return nil, fmt.Errorf("workload H: %w", err)
-	}
-	results = append(results, wl)
-
 	return results, nil
 }
 
-func runSQLiteWorkload(baseDir, name string, fn func(*sqliteDB) ([]time.Duration, error)) (WorkloadResult, error) {
+func runSQLiteWorkload(baseDir, name string, fn sqliteWorkload) (WorkloadResult, error) {
 	dir := filepath.Join(baseDir, "sqlite")
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -178,7 +174,7 @@ func runSQLiteWorkload(baseDir, name string, fn func(*sqliteDB) ([]time.Duration
 		return WorkloadResult{}, err
 	}
 
-	latencies, err := fn(d)
+	latencies, wall, err := fn(d)
 	if err != nil {
 		d.close() //nolint:errcheck
 		return WorkloadResult{}, err
@@ -188,102 +184,52 @@ func runSQLiteWorkload(baseDir, name string, fn func(*sqliteDB) ([]time.Duration
 		return WorkloadResult{}, err
 	}
 
-	disk := diskUsage(dir)
-	p50, p95, p99 := latencyStats(latencies)
-	n := len(latencies)
-
-	var totalDur time.Duration
-	for _, l := range latencies {
-		totalDur += l
-	}
-	opsPerSec := float64(n) / totalDur.Seconds()
-
-	return WorkloadResult{
-		Workload:  name,
-		Engine:    sqliteEngine,
-		OpsPerSec: opsPerSec,
-		P50Ms:     p50,
-		P95Ms:     p95,
-		P99Ms:     p99,
-		DiskBytes: disk,
-	}, nil
-}
-
-func runSQLiteWorkloadG(baseDir, name string, goroutines int) (WorkloadResult, error) {
-	dir := filepath.Join(baseDir, "sqlite")
-	os.RemoveAll(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return WorkloadResult{}, err
-	}
-
-	d, err := openSQLite(dir)
-	if err != nil {
-		return WorkloadResult{}, err
-	}
-
-	latencies, wallTime, err := workloadGSQLite(d, goroutines)
-	if err != nil {
-		d.close() //nolint:errcheck
-		return WorkloadResult{}, err
-	}
-
-	if err := d.close(); err != nil {
-		return WorkloadResult{}, err
-	}
-
-	disk := diskUsage(dir)
-	p50, p95, p99 := latencyStats(latencies)
-	opsPerSec := float64(len(latencies)) / wallTime.Seconds()
-
-	return WorkloadResult{
-		Workload:  name,
-		Engine:    sqliteEngine,
-		OpsPerSec: opsPerSec,
-		P50Ms:     p50,
-		P95Ms:     p95,
-		P99Ms:     p99,
-		DiskBytes: disk,
-	}, nil
+	result := resultFor(name, sqliteEngine, latencies, wall)
+	result.DiskBytes = diskUsage(dir)
+	return result, nil
 }
 
 // ── Workload implementations ──────────────────────────────────────────────
 
-func workloadASQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadASQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	keys := SequentialKeys(10_000)
 	vals := RandomValues(10_000, 1, 64)
 	latencies := make([]time.Duration, len(keys))
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		if err := d.set(k, vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
-func workloadBSQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadBSQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	keys := RandomKeys(10_000, 2)
 	vals := RandomValues(10_000, 2, 64)
 	latencies := make([]time.Duration, len(keys))
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		if err := d.set(k, vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
-func workloadCSQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadCSQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	keys := SequentialKeys(5_000)
 	vals := RandomValues(5_000, 3, 64)
 	latencies := make([]time.Duration, 0, len(keys)*2)
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		if err := d.set(k, vals[i]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies = append(latencies, time.Since(start))
 
@@ -291,18 +237,19 @@ func workloadCSQLite(d *sqliteDB) ([]time.Duration, error) {
 		d.get(k)
 		latencies = append(latencies, time.Since(start))
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
-func workloadDSQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadDSQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	const n = 5_000
 	keys := SequentialKeys(n)
 	vals := RandomValues(n, 4, 64)
 	if err := d.batchSet(keys, vals); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	rng := rand.New(rand.NewSource(4))
 	latencies := make([]time.Duration, n)
+	timed := time.Now()
 	for i := 0; i < n; i++ {
 		var key []byte
 		if rng.Intn(2) == 0 {
@@ -314,16 +261,17 @@ func workloadDSQLite(d *sqliteDB) ([]time.Duration, error) {
 		d.get(key)
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
-func workloadESQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadESQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	const (
 		numKeys    = 10
 		iterations = 1_000
 	)
 	rng := rand.New(rand.NewSource(5))
 	latencies := make([]time.Duration, numKeys*iterations)
+	timed := time.Now()
 	idx := 0
 	for i := 0; i < iterations; i++ {
 		for j := 0; j < numKeys; j++ {
@@ -331,42 +279,43 @@ func workloadESQLite(d *sqliteDB) ([]time.Duration, error) {
 			val := []byte(fmt.Sprintf("val%08d", rng.Int63()))
 			start := time.Now()
 			if err := d.set(key, val); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			latencies[idx] = time.Since(start)
 			idx++
 		}
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
-func workloadFSQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadFSQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	const n = 5_000
 	keys := SequentialKeys(n)
 	vals := RandomValues(n, 6, 64)
 	if err := d.batchSet(keys, vals); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	rng := rand.New(rand.NewSource(6))
 	perm := rng.Perm(n)
 	for _, idx := range perm[:n/2] {
 		if err := d.delete(keys[idx]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
 	latencies := make([]time.Duration, n)
+	timed := time.Now()
 	for i, k := range keys {
 		start := time.Now()
 		d.get(k)
 		latencies[i] = time.Since(start)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // H: 10,000 sequential keys pre-populated, 1,000 range scans of 100-key windows.
-func workloadHSQLite(d *sqliteDB) ([]time.Duration, error) {
+func workloadHSQLite(d *sqliteDB) ([]time.Duration, time.Duration, error) {
 	const (
 		numKeys    = 10_000
 		numScans   = 1_000
@@ -375,19 +324,20 @@ func workloadHSQLite(d *sqliteDB) ([]time.Duration, error) {
 	keys := SequentialKeys(numKeys)
 	vals := RandomValues(numKeys, 8, 64)
 	if err := d.batchSet(keys, vals); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	rng := rand.New(rand.NewSource(8))
 	latencies := make([]time.Duration, numScans)
+	timed := time.Now()
 	for i := range latencies {
 		startIdx := rng.Intn(numKeys - windowSize)
 		t := time.Now()
 		if _, err := d.scan(keys[startIdx], keys[startIdx+windowSize-1]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		latencies[i] = time.Since(t)
 	}
-	return latencies, nil
+	return latencies, time.Since(timed), nil
 }
 
 // G: pre-populate 10,000 keys via batchSet, then run goroutines concurrent

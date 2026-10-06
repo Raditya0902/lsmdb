@@ -308,6 +308,23 @@ go run scripts/vm_smoke_check.go -expect base=bfa2a77 -expect fix=56267a1 \
   "benchmarks/results/$(date -u +%F)-p12a-compare.json"
 ```
 
+**The p12a file name.** The command above writes
+`benchmarks/results/<date>-p12a-compare.json`, where `<date>` is the UTC date the
+run started. The committed result of the 2026-10-05 run is named
+`benchmarks/results/2026-10-05-p12a-dup-ack-compare.json` instead. To give a new
+run's output the same form, rename it after its check passes. Set `D` to the date
+in the output file's name, not to today's date:
+
+```bash
+D=YYYY-MM-DD   # replace with the date in the new output file's name
+mv -n "benchmarks/results/$D-p12a-compare.json" "benchmarks/results/$D-p12a-dup-ack-compare.json"
+ls -l "benchmarks/results/$D-p12a-dup-ack-compare.json"
+```
+
+This renames only the new, uncommitted output. `mv -n` refuses to replace a file
+that already exists, so the committed 2026-10-05 file cannot be overwritten. Never
+rename a committed result file.
+
 **Phase 12b: the append cap and the log copy (75 runs, about 47 minutes).** The
 committed file is `benchmarks/results/2026-10-05-p12b-compare.json`.
 

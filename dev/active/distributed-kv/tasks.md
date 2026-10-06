@@ -197,9 +197,19 @@ Items in commit order:
 
 - [x] The large-value test logs every node's term and commit index before
   failing.
-- [ ] Test timing under the race detector: the in-memory chunking test waits for
-  a stable leader, and the two real-time 12b tests scale their ticks under a
-  `race` build tag only. No assertion is loosened.
+- [x] Test timing under the race detector, without loosening any assertion or
+  changing any timeout (the 4x tick scaling was tried and not committed):
+  - (a) The in-memory chunking test waits until every node agrees on the
+    leader before write 0 (`8d3a6fe`). Not reproduced: one failure in a full
+    `-race` suite, fixed from reading `waitForMemoryLeader`.
+  - (b) **A3 under the race detector** (`15cda40`): under `-race`,
+    `TestLargeValueWritesKeepOneLeader` runs only with `LSMDB_RACE_STRESS=1`.
+    The non-race run stays the gate. Lift the skip once the heartbeat
+    prerequisite below is decided and implemented, and A3 passes under
+    `-race` again.
+  - The A3 failures are consistent with a transport backlog under race
+    overhead. They are not shown to be caused by the race detector: 3 of 40
+    against 0 of 40 is one-sided Fisher p ≈ 0.12 on its own.
 - [ ] Flush and compaction counted and timed in the engine; per-window deltas in
   clusterbench JSON (`bench_compare summarize` unchanged).
 - [ ] `Runtime.Close` returns after the runtime has stopped itself (still nil).
@@ -208,7 +218,36 @@ Items in commit order:
   message term). A violation is dropped, counted and logged, with no reject.
 - [ ] The client's message limit uses the server constant.
 - [ ] Raft log format guard: versioned file, `raft.log` guard directory,
-  refusal instead of truncation (D020), after the old-binary gate.
+  refusal instead of truncation (D020), after the old-binary gate. Last and
+  optional.
+
+Findings from the A3 diagnostics (unfixed; line numbers at `e1123fc`):
+
+- **Prerequisite decision for phase 13 Step 1, not work to start now:**
+  heartbeats re-ship multi-MiB entries with no in-flight limit. A heartbeat
+  is a full append from `nextIndex` (`internal/raft/node.go:700-715`), and
+  `nextIndex` moves only on acks. Each send is its own goroutine with a
+  500 ms deadline (`internal/raftnode/runtime.go:512-527`).
+  - A lagging follower is sent the same 2.5 MiB entry every 20 ms tick: up to
+    125 MiB/s per lagging follower.
+  - Followers went up to 1,013 ms without leader contact. There were up to 204
+    deadline failures per node per run.
+  - Phase 13 Step 1 decides between entry-less heartbeats and an in-flight
+    limit, lite or full. These are D019's phase-12c items, and each must keep
+    a catch-up path that meets D019's recovery bound.
+- **The vote handler has no lease check.** `handleVote` (`node.go:435-450`)
+  has none, and `Step` adopts any higher term first (`:142-147`).
+  `handlePreVote` has one (`:401-402`). In 2 of 15 elections a node voted 2.8
+  and 9.6 ms after hearing the current leader.
+- **A deposed leader's sends keep running for up to 500 ms**, because they
+  are not cancelled on step-down. In one run, 43 sends from the old term were
+  still expiring after the new leader took over.
+- **The check-quorum window (5 ticks, 100 ms) is shorter than the election
+  timeout (5–10 ticks).** A leader steps down when multi-MiB acks take longer.
+  There were 2 step-downs in one run.
+- **A buffered tick shortens an election timeout.** A 5-tick timeout fired
+  83 ms after the timer reset: the runtime ticker can hold a tick that is
+  delivered right after the reset.
 
 ## Verification Log
 
@@ -316,6 +355,38 @@ Items in commit order:
     nodes (leader at commit 18, both followers' Status timing out, 0 elections
     among the 1 node that answered). The new file vets and lists on `6d6dda7`
     and `8c8a317`, and passes on the tip with and without `-race`.
+  - Test timing, first attempt (stopped, nothing committed): A3 reproduced
+    under 8 busy processes (3 of 10 failed, with 1–3 elections). A 4x tick
+    scaling under a `race` build tag still had a 2-election run, so it stopped
+    on stop condition 4. The in-memory failure did not reproduce in about 192
+    runs.
+  - (a) on `e1123fc`, before committing: gofmt, vet and `go test ./...` pass.
+    `go test -race ./...` failed only in A3 (1 election). Under rule 1,
+    `go test -race -count=10 ./cluster` passed 8 of 10, both failures A3 (11
+    and 12 elections, 0 failed writes, equal commits), so it stopped there.
+  - Control, A3 alone under `-race`, interleaved blocks of 10: `966e951` 0 of
+    40, `e1123fc` 0 of 40 (load average 1.5–8.4). The rule needed at least 5
+    failures, so it could not fire. At 0 of 40, each arm's true rate could
+    still be up to about 7.5%.
+  - Diagnostics, A3 alone, temporary and reverted. They recorded event-loop,
+    persist and fsync times, elections, send failures and scheduler lateness.
+    - With `-race`: 1 of 20 failed at ambient load, 2 of 20 with 8 busy
+      processes.
+    - Without `-race`: 0 of 40.
+    - Worst stalls with `-race`: persist 189 ms, fsync 47 ms, event-loop
+      iteration 420 ms, tick gap 733 ms, inbound queue wait 604 ms, scheduler
+      107 ms late. Without `-race`: persist 27 ms, fsync 26 ms.
+    - In the 500 ms before the election analysed in detail, no stall reached
+      50 ms on any node.
+    - Every pre-vote grant came from a node whose lease had lapsed, and the
+      initiators rotated.
+  - After (a) `8d3a6fe`: gofmt, vet, `go test ./...` and `-race` pass (17 ok
+    each).
+  - Before (b), under `-race` at ambient load, `-count=10`: the 4 MiB commit
+    test and the oversized Put test, 10 of 10 each.
+  - After (b) `15cda40`: `go test -race -count=10 ./cluster` passes all 10
+    iterations (A3 skipped). `LSMDB_RACE_STRESS=1` runs A3 under `-race` (3 of
+    3 pass). gofmt, vet, `go test ./...` and `-race` pass (17 ok each).
 
 ## Blockers
 
@@ -324,8 +395,10 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Phase 12b hardening: the test-timing commit, then items 2, 5, 4, 6 and 3 as
-separate commits, tests first, as in `dev/active/phase-12b-hardening/plan.md`.
+Phase 12b hardening: items 2, 5, 4 and 6 as separate commits, tests first, as
+in `dev/active/phase-12b-hardening/plan.md`. Then Step 1 (docs) of the vote
+lease (D021), which stops for approval. Item 3 (the log format guard) comes
+last and is optional.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

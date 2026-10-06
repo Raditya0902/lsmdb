@@ -87,3 +87,44 @@ func TestCounterDeltasIncludeEngineFlushesAndCompactions(t *testing.T) {
 		}
 	}
 }
+
+func TestCounterDeltasSplitLogSyncsByRole(t *testing.T) {
+	syncs := func(leader, follower float64) map[string]float64 {
+		return map[string]float64{
+			"lsmdb_raft_log_syncs_total":                        leader + follower,
+			"lsmdb_raft_log_syncs_by_role_total{role=leader}":   leader,
+			"lsmdb_raft_log_syncs_by_role_total{role=follower}": follower,
+			// Entries are four per leader sync and two per follower sync.
+			"lsmdb_raft_log_sync_entries_total":                        4*leader + 2*follower,
+			"lsmdb_raft_log_sync_entries_by_role_total{role=leader}":   4 * leader,
+			"lsmdb_raft_log_sync_entries_by_role_total{role=follower}": 2 * follower,
+		}
+	}
+	// Node 1 led before the window and node 2 during it.
+	before := []map[string]float64{syncs(7, 3), syncs(0, 9), syncs(0, 9)}
+	after := []map[string]float64{syncs(7, 13), syncs(50, 9), syncs(0, 59)}
+	got := counterDeltas(before, after, 200)
+	if got.LeaderLogSyncs != 50 || got.FollowerLogSyncs != 60 || got.LeaderLogSyncEntries != 200 || got.FollowerLogSyncEntries != 120 {
+		t.Fatalf("split = leader %v syncs %v entries, follower %v syncs %v entries; want 50, 200, 60, 120",
+			got.LeaderLogSyncs, got.LeaderLogSyncEntries, got.FollowerLogSyncs, got.FollowerLogSyncEntries)
+	}
+	if got.LeaderLogSyncs+got.FollowerLogSyncs != got.LogSyncs || got.LeaderLogSyncEntries+got.FollowerLogSyncEntries != got.LogSyncEntries {
+		t.Fatalf("leader + follower = %v syncs, %v entries; want the totals %v and %v",
+			got.LeaderLogSyncs+got.FollowerLogSyncs, got.LeaderLogSyncEntries+got.FollowerLogSyncEntries, got.LogSyncs, got.LogSyncEntries)
+	}
+	if got.LeaderEntriesPerSync != 4 || got.FollowerEntriesPerSync != 2 {
+		t.Fatalf("entries per sync = %v leader, %v follower; want 4 and 2", got.LeaderEntriesPerSync, got.FollowerEntriesPerSync)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"leader_log_syncs":50`, `"leader_log_sync_entries":200`, `"follower_log_syncs":60`, `"follower_log_sync_entries":120`,
+		`"leader_entries_per_log_sync":4`, `"follower_entries_per_log_sync":2`,
+	} {
+		if !strings.Contains(string(data), field) {
+			t.Errorf("counters JSON lacks %s: %s", field, data)
+		}
+	}
+}

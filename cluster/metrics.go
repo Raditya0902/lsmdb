@@ -41,6 +41,8 @@ type nodeMetrics struct {
 	rpcDuration       *prometheus.HistogramVec
 	logSyncs          prometheus.Counter
 	logSyncEntries    prometheus.Counter
+	roleLogSyncs      *prometheus.CounterVec
+	roleLogEntries    *prometheus.CounterVec
 	hardStateSyncs    prometheus.Counter
 	droppedAppends    prometheus.Counter
 	appendMessages    *prometheus.CounterVec
@@ -71,6 +73,8 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 		rpcDuration:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "lsmdb_grpc_request_duration_seconds", Help: "gRPC request latency.", ConstLabels: constant, Buckets: prometheus.DefBuckets}, []string{"method"}),
 		logSyncs:          prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_syncs_total", Help: "Raft log append syncs: successful persists carrying at least one entry.", ConstLabels: constant}),
 		logSyncEntries:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_log_sync_entries_total", Help: "Log entries written by Raft log append syncs.", ConstLabels: constant}),
+		roleLogSyncs:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_log_syncs_by_role_total", Help: "Raft log append syncs split by role: follower when the persist answers an append or snapshot, leader otherwise.", ConstLabels: constant}, []string{"role"}),
+		roleLogEntries:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_log_sync_entries_by_role_total", Help: "Log entries written by Raft log append syncs, split by role as lsmdb_raft_log_syncs_by_role_total.", ConstLabels: constant}, []string{"role"}),
 		hardStateSyncs:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_hardstate_syncs_total", Help: "Successful persists carrying a term or vote change.", ConstLabels: constant}),
 		droppedAppends:    prometheus.NewCounter(prometheus.CounterOpts{Name: "lsmdb_raft_malformed_appends_dropped_total", Help: "Appends dropped because their entries could not have come from a correct leader.", ConstLabels: constant}),
 		appendMessages:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lsmdb_raft_append_messages_total", Help: "AppendEntries messages handed to the transport, by emitting code path.", ConstLabels: constant}, []string{"origin"}),
@@ -83,11 +87,15 @@ func newNodeMetrics(nodeID uint64) *nodeMetrics {
 	for _, class := range []string{sendFailureDeadline, sendFailureOther} {
 		m.sendFailures.WithLabelValues(class)
 	}
+	for _, role := range []string{syncRoleLeader, syncRoleFollower} {
+		m.roleLogSyncs.WithLabelValues(role)
+		m.roleLogEntries.WithLabelValues(role)
+	}
 	m.registry.MustRegister(
 		m.role, m.term, m.leader, m.commit, m.applied, m.logLength, m.snapshotIndex, m.replicationLag,
 		m.elections, m.leadershipChanges, m.quorumLoss, m.proposals,
 		m.transportFailures, m.sendFailures, m.rpcRequests, m.rpcDuration,
-		m.logSyncs, m.logSyncEntries, m.hardStateSyncs, m.droppedAppends, m.appendMessages, m.applySeconds, m.snapshotSeconds,
+		m.logSyncs, m.logSyncEntries, m.roleLogSyncs, m.roleLogEntries, m.hardStateSyncs, m.droppedAppends, m.appendMessages, m.applySeconds, m.snapshotSeconds,
 	)
 	return m
 }
@@ -273,8 +281,11 @@ func (s *observedStore) PersistSnapshot(update raft.Update, writeData func(io.Wr
 
 func (s *observedStore) count(update raft.Update) {
 	if len(update.Entries) > 0 {
+		role := syncRole(update)
 		s.metrics.logSyncs.Inc()
 		s.metrics.logSyncEntries.Add(float64(len(update.Entries)))
+		s.metrics.roleLogSyncs.WithLabelValues(role).Inc()
+		s.metrics.roleLogEntries.WithLabelValues(role).Add(float64(len(update.Entries)))
 	}
 	if update.HardState != nil {
 		s.metrics.hardStateSyncs.Inc()
@@ -282,6 +293,24 @@ func (s *observedStore) count(update raft.Update) {
 	if update.DroppedAppend != "" {
 		s.metrics.droppedAppends.Inc()
 	}
+}
+
+const (
+	syncRoleLeader   = "leader"
+	syncRoleFollower = "follower"
+)
+
+// syncRole attributes an entry-carrying persist to the follower when it
+// answers an append or snapshot from a leader, and to the leader otherwise:
+// only a leader appends entries that answer nothing (proposals and its
+// no-op), and a follower answers every append whose entries it persists.
+func syncRole(update raft.Update) string {
+	for _, message := range update.Messages {
+		if message.Type == raft.MsgAppendResponse || message.Type == raft.MsgSnapshotResponse {
+			return syncRoleFollower
+		}
+	}
+	return syncRoleLeader
 }
 
 func (s *observedStore) OpenSnapshot(index uint64) (io.ReadCloser, uint64, uint32, error) {

@@ -206,6 +206,42 @@ func TestLeaderBatchesConcurrentProposals(t *testing.T) {
 	}
 }
 
+// TestLogSyncsSplitByRoleSumToTotal checks the leader and follower split of
+// log syncs on a live cluster: on every node the two parts sum to the total,
+// and each node's syncs fall in its own role's part.
+func TestLogSyncsSplitByRoleSumToTotal(t *testing.T) {
+	replicas := startMemoryCluster(t)
+	leader := waitForMemoryLeader(t, replicas)
+	before := make(map[uint64]map[string]float64)
+	for id, replica := range replicas {
+		before[id] = mustSnapshot(t, replica.metrics)
+	}
+	if err := proposeConcurrently(leader, 8, 200); err != nil {
+		t.Fatal(err)
+	}
+	for id, replica := range replicas {
+		after := mustSnapshot(t, replica.metrics)
+		delta := func(name string) float64 { return after[name] - before[id][name] }
+		own, other := "leader", "follower"
+		if replica != leader {
+			own, other = other, own
+		}
+		for _, metric := range []string{"lsmdb_raft_log_syncs", "lsmdb_raft_log_sync_entries"} {
+			ownPart := delta(metric + "_by_role_total{role=" + own + "}")
+			otherPart := delta(metric + "_by_role_total{role=" + other + "}")
+			total := delta(metric + "_total")
+			t.Logf("node %d (%s) %s: %v own, %v other, %v total", id, own, metric, ownPart, otherPart, total)
+			if ownPart+otherPart != total {
+				t.Errorf("node %d %s: %v + %v != total %v", id, metric, ownPart, otherPart, total)
+			}
+			if ownPart == 0 || otherPart != 0 {
+				t.Errorf("node %d, a %s: %s = %v as %s and %v as %s, want all of it as %s",
+					id, own, metric, ownPart, own, otherPart, other, own)
+			}
+		}
+	}
+}
+
 func TestLinearizableReadCompletesDuringConcurrentWrites(t *testing.T) {
 	replicas := startMemoryCluster(t)
 	leader := waitForMemoryLeader(t, replicas)

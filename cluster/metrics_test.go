@@ -94,6 +94,53 @@ func TestObservedStoreCountsLogSyncs(t *testing.T) {
 	}
 }
 
+func TestObservedStoreSplitsLogSyncsByRole(t *testing.T) {
+	metrics := newNodeMetrics(1)
+	store := &observedStore{inner: fakeStableStore{}, metrics: metrics}
+	answer := func(kind raft.MessageType) []raft.Message { return []raft.Message{{Type: kind, To: 2}} }
+	for _, update := range []raft.Update{
+		{Entries: entries(2), Messages: answer(raft.MsgAppend)}, // leader: proposals sent on
+		{Entries: entries(1)}, // leader: no follower ready to send to
+		{Entries: entries(3), Messages: answer(raft.MsgAppendResponse)}, // follower: answers an append
+		{Entries: entries(4), HardState: &raft.HardState{Term: 2}, Messages: answer(raft.MsgAppendResponse)},
+		{HardState: &raft.HardState{Term: 3}, Messages: answer(raft.MsgAppendResponse)}, // no entries: not a log sync
+	} {
+		if err := store.Persist(update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := mustSnapshot(t, metrics)
+	want := map[string]float64{
+		"lsmdb_raft_log_syncs_by_role_total{role=leader}":          2,
+		"lsmdb_raft_log_sync_entries_by_role_total{role=leader}":   3,
+		"lsmdb_raft_log_syncs_by_role_total{role=follower}":        2,
+		"lsmdb_raft_log_sync_entries_by_role_total{role=follower}": 7,
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Errorf("%s = %v, want %v", name, got[name], value)
+		}
+	}
+	for _, metric := range []string{"lsmdb_raft_log_syncs", "lsmdb_raft_log_sync_entries"} {
+		split := got[metric+"_by_role_total{role=leader}"] + got[metric+"_by_role_total{role=follower}"]
+		if total := got[metric+"_total"]; split != total {
+			t.Errorf("%s: leader + follower = %v, want the total %v", metric, split, total)
+		}
+	}
+}
+
+func TestLogSyncRolesAreRegisteredAtZero(t *testing.T) {
+	got := mustSnapshot(t, newNodeMetrics(1))
+	for _, name := range []string{
+		"lsmdb_raft_log_syncs_by_role_total{role=leader}", "lsmdb_raft_log_syncs_by_role_total{role=follower}",
+		"lsmdb_raft_log_sync_entries_by_role_total{role=leader}", "lsmdb_raft_log_sync_entries_by_role_total{role=follower}",
+	} {
+		if value, ok := got[name]; !ok || value != 0 {
+			t.Errorf("%s = %v (present %v), want 0 before any persist", name, value, ok)
+		}
+	}
+}
+
 func TestObservedTransportCountsAppendsByOrigin(t *testing.T) {
 	metrics := newNodeMetrics(1)
 	transport := &observedTransport{inner: fakeTransport{}, metrics: metrics}

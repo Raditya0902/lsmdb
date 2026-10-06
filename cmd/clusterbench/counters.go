@@ -5,13 +5,20 @@ import "strings"
 const (
 	appendMetricPrefix      = "lsmdb_raft_append_messages_total{origin="
 	sendFailureMetricPrefix = "lsmdb_raft_transport_send_failures_total{class="
+	roleSyncsMetricPrefix   = "lsmdb_raft_log_syncs_by_role_total{role="
+	roleEntriesMetricPrefix = "lsmdb_raft_log_sync_entries_by_role_total{role="
 )
 
 // Counters holds replication counter deltas over the measurement window,
-// summed across the three nodes, and ratios per committed entry.
+// summed across the three nodes, and ratios per committed entry. The leader
+// and follower log sync fields split the totals; each pair sums to its total.
 type Counters struct {
 	LogSyncs                        float64            `json:"log_syncs"`
 	LogSyncEntries                  float64            `json:"log_sync_entries"`
+	LeaderLogSyncs                  float64            `json:"leader_log_syncs"`
+	LeaderLogSyncEntries            float64            `json:"leader_log_sync_entries"`
+	FollowerLogSyncs                float64            `json:"follower_log_syncs"`
+	FollowerLogSyncEntries          float64            `json:"follower_log_sync_entries"`
 	HardStateSyncs                  float64            `json:"hardstate_syncs"`
 	AppendMessagesTotal             float64            `json:"append_messages_total"`
 	AppendMessages                  map[string]float64 `json:"append_messages_by_origin"`
@@ -21,6 +28,8 @@ type Counters struct {
 	SnapshotCount                   float64            `json:"snapshot_count"`
 	SyncsPerCommittedEntry          float64            `json:"log_syncs_per_committed_entry"`
 	EntriesPerSync                  float64            `json:"entries_per_log_sync"`
+	LeaderEntriesPerSync            float64            `json:"leader_entries_per_log_sync"`
+	FollowerEntriesPerSync          float64            `json:"follower_entries_per_log_sync"`
 	AppendPerCommittedEntry         float64            `json:"append_messages_per_committed_entry"`
 	AppendPerCommittedEntryByOrigin map[string]float64 `json:"append_messages_per_committed_entry_by_origin"`
 	// SendFailuresDeadline counts outbound Raft sends whose deadline expired;
@@ -49,6 +58,8 @@ func counterDeltas(before, after []map[string]float64, committed uint64) Counter
 	}
 	counters := Counters{
 		LogSyncs: delta("lsmdb_raft_log_syncs_total"), LogSyncEntries: delta("lsmdb_raft_log_sync_entries_total"),
+		LeaderLogSyncs: delta(roleSyncsMetricPrefix + "leader}"), LeaderLogSyncEntries: delta(roleEntriesMetricPrefix + "leader}"),
+		FollowerLogSyncs: delta(roleSyncsMetricPrefix + "follower}"), FollowerLogSyncEntries: delta(roleEntriesMetricPrefix + "follower}"),
 		HardStateSyncs: delta("lsmdb_raft_hardstate_syncs_total"),
 		ApplySeconds:   delta("lsmdb_raft_apply_seconds_sum"), ApplyCount: delta("lsmdb_raft_apply_seconds_count"),
 		SnapshotSeconds: delta("lsmdb_raft_snapshot_seconds_sum"), SnapshotCount: delta("lsmdb_raft_snapshot_seconds_count"),
@@ -82,6 +93,8 @@ func counterDeltas(before, after []map[string]float64, committed uint64) Counter
 	entries := float64(committed)
 	counters.SyncsPerCommittedEntry = ratio(counters.LogSyncs, entries)
 	counters.EntriesPerSync = ratio(counters.LogSyncEntries, counters.LogSyncs)
+	counters.LeaderEntriesPerSync = ratio(counters.LeaderLogSyncEntries, counters.LeaderLogSyncs)
+	counters.FollowerEntriesPerSync = ratio(counters.FollowerLogSyncEntries, counters.FollowerLogSyncs)
 	counters.AppendPerCommittedEntry = ratio(counters.AppendMessagesTotal, entries)
 	for origin, count := range counters.AppendMessages {
 		counters.AppendPerCommittedEntryByOrigin[origin] = ratio(count, entries)

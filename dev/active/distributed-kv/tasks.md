@@ -392,7 +392,8 @@ prerequisite work.
     - P7: A3 passed 5 of 5 on prerequisite and on final on the VM; copy
       passed 5 of 5; storm passed 0 of 5 as expected (12–23 elections per
       run); no hangs. `go test ./...` passed on the VM. The `-race`
-      evidence is from the Mac at `21be5d5`.
+      evidence is from the Mac at `21be5d5`. On GitHub runners A3 failed
+      2 of 4 runs (see "A3 on GitHub runners" under "After Phase 13").
     - The environment check is in band: copy's 4-client median is 437.5
       (374.7–506.9).
   - **Attribution:**
@@ -451,6 +452,24 @@ Not fixed. Each item is its own change, after the stack is merged.
   copy's while its p99 is a quarter of copy's. The cause is unknown and was
   not investigated. Candidates to check: batch-sized persists at the cap,
   and compaction volume (final commits about 3.7× the entries per window).
+- [ ] **A3 on GitHub runners.** `TestLargeValueWritesKeepOneLeader` at the
+  final arm's code failed 2 of 4 CI runs on GitHub-hosted runners: 2 and 3
+  elections, 0 failed writes.
+  - Passed: both runs on `0ea54ac`.
+  - Failed: both runs on `a0659aa`, whose diff does not touch A3.
+  - Runner details: ubuntu-24.04, Go 1.22.0 from `go.mod` (the Mac and VM
+    used Go 1.26.1). The logs do not report the CPU count.
+  - Not reproduced locally: 0 of 30 under `-race -cpu 2`, with load
+    average 2.3–3.2. The diagnosis is inconclusive.
+  - Not separated:
+    - environment stalls;
+    - check-quorum step-downs (a 5-tick window against the election
+      timeout, with multi-MiB entries);
+    - an election by a node that heard the leader recently.
+  - The saved diagnostics patch (2026-10-05, for `e1123fc`) no longer
+    applies and would need porting.
+  - CI skips A3 unless `LSMDB_RACE_STRESS=1` is set. Next: run it on a
+    runner-like machine with the diagnostics.
 - [x] **Three test flakes seen on GitHub runners, fixed at the tip**
   (test-only commit on `phase-13-group-commit`). They showed on the stacked
   PRs' intermediate commits:

@@ -726,6 +726,22 @@ Results (measured 2026-10-06, `benchmarks/results/2026-10-06-p13-compare.json`):
     platform, or a multi-machine cluster would give different numbers.
     These numbers are not comparable to the Mac or to other platforms.
   - **P7's `-race` evidence** comes from the Mac at `21be5d5`, not the VM.
+  - **A3 on GitHub runners:**
+    - **Where P7's A3 was measured:** on the 4 vCPU VM (5 of 5 per arm)
+      and on the Mac.
+    - **Runner results:** on GitHub-hosted runners (ubuntu-24.04, Go 1.22.0
+      from `go.mod`), A3 failed 2 of 4 CI runs at the final arm's code,
+      with 2 and 3 elections and 0 failed writes. Both runs on `0ea54ac`
+      passed; both on `a0659aa` failed, and that commit's diff does not
+      touch A3. The logs do not report the runner's CPU count.
+    - **Diagnosis, inconclusive:** not reproduced locally, 0 of 30 runs
+      under `-race -cpu 2` (Go 1.26.1, load average 2.3–3.2), so no
+      stall, check-quorum or campaign diagnostics were collected.
+    - **Claim wording:** "A3 held with 0 elections on the VM
+      (e2-standard-4, pd-ssd) and on the Mac. No claim is made for slower
+      or shared machines: GitHub-hosted runners showed 2–3 elections in 2
+      of 4 runs, with no failed writes."
+    - **CI:** A3 is skipped when `CI=true` unless `LSMDB_RACE_STRESS=1`.
   - **Linearizability:** none claimed. Reads (shared probes) are covered by
     tests only, because clusterbench issues only writes.
   - **Attempt 1:** stage 1 first stopped at run 43 of 60 on a harness port

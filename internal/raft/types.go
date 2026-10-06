@@ -214,6 +214,9 @@ type Status struct {
 	// MalformedAppendsDropped counts appends dropped since start because
 	// their entries could not have come from a correct leader.
 	MalformedAppendsDropped uint64
+	// VotesIgnoredInLease counts vote requests at a higher term ignored
+	// since start because this node was in its vote lease (D021).
+	VotesIgnoredInLease uint64
 }
 
 var (

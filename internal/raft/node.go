@@ -32,6 +32,7 @@ type Node struct {
 	recentActive map[uint64]bool
 
 	malformedAppendsDropped uint64
+	votesIgnoredInLease     uint64
 }
 
 // New constructs a node from durable hard state and log entries.
@@ -148,6 +149,13 @@ func (n *Node) Step(message Message) Update {
 			update.DroppedAppend = fmt.Sprintf("from %d at term %d: %s", message.From, message.Term, reason)
 			return update
 		}
+	}
+	// A vote request at a higher term reaching a node in its lease is ignored
+	// before the term is adopted (D021). A reply would carry this node's lower
+	// term, and the candidate's stale-term answer would end the lease anyway.
+	if message.Type == MsgVote && message.Term > n.term && n.inLease() {
+		n.votesIgnoredInLease++
+		return update
 	}
 
 	if message.Type != MsgPreVote && message.Type != MsgPreVoteResponse {
@@ -300,6 +308,7 @@ func (n *Node) Status() Status {
 		SnapshotIndex: n.snapshot.Index, RetainedLogEntries: uint64(len(n.log)),
 		Membership:              cloneMembership(n.membership),
 		MalformedAppendsDropped: n.malformedAppendsDropped,
+		VotesIgnoredInLease:     n.votesIgnoredInLease,
 	}
 	if n.role == Leader {
 		status.MatchIndex = make(map[uint64]uint64, len(n.matchIndex))
@@ -407,6 +416,14 @@ func (n *Node) becomeFollower(term, leader uint64) Update {
 		update.HardState = n.hardState()
 	}
 	return update
+}
+
+// inLease reports whether this node is in its vote lease (D021). A leader is in
+// lease by role; any other node while it has a leader it heard within
+// ElectionTickMin ticks. The randomized election timeout only spreads
+// campaigns, so it does not lengthen the lease.
+func (n *Node) inLease() bool {
+	return n.role == Leader || (n.leaderID != 0 && n.electionElapsed < n.cfg.ElectionTickMin)
 }
 
 func (n *Node) handlePreVote(message Message) Message {

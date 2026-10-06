@@ -342,3 +342,114 @@ func TestLeaderThatLosesQuorumLeavesLeaseWithinTwoCheckWindows(t *testing.T) {
 		t.Fatalf("former leader vote reply = %+v, want one grant", update.Messages)
 	}
 }
+
+// stepIgnoredVote steps a vote request into node and checks that it was
+// ignored: no reply, no persistence, and no change to term, vote, role,
+// leader, election timer or log; only the ignored-vote counter moves.
+func stepIgnoredVote(t *testing.T, node *Node, message Message) {
+	t.Helper()
+	before := node.Status()
+	elapsed, timeout := node.electionElapsed, node.electionTimeout
+	update := node.Step(message)
+	after := node.Status()
+	if len(update.Messages) != 0 || len(update.Entries) != 0 || update.TruncateFrom != 0 ||
+		len(update.Committed) != 0 || update.HardState != nil || update.RoleChanged {
+		t.Errorf("node %d: update has messages %+v, %d entries, truncate %d, %d committed, hardstate %+v, role changed %v; want nothing",
+			before.ID, update.Messages, len(update.Entries), update.TruncateFrom, len(update.Committed), update.HardState, update.RoleChanged)
+	}
+	if after.Term != before.Term || after.VotedFor != before.VotedFor || after.Role != before.Role ||
+		after.LeaderID != before.LeaderID || after.LastLogIndex != before.LastLogIndex {
+		t.Errorf("node %d: term %d -> %d, votedFor %d -> %d, role %s -> %s, leader %d -> %d, last index %d -> %d; want unchanged",
+			before.ID, before.Term, after.Term, before.VotedFor, after.VotedFor, before.Role, after.Role,
+			before.LeaderID, after.LeaderID, before.LastLogIndex, after.LastLogIndex)
+	}
+	if node.electionElapsed != elapsed || node.electionTimeout != timeout {
+		t.Errorf("node %d: election timer %d/%d -> %d/%d, want unchanged",
+			before.ID, elapsed, timeout, node.electionElapsed, node.electionTimeout)
+	}
+	if after.VotesIgnoredInLease != before.VotesIgnoredInLease+1 {
+		t.Errorf("node %d: VotesIgnoredInLease %d -> %d, want +1", before.ID, before.VotesIgnoredInLease, after.VotesIgnoredInLease)
+	}
+}
+
+func TestVoterInLeaseIgnoresHigherTermVote(t *testing.T) {
+	nodes, votes := campaignAgainstLiveLeader(t)
+	leader := nodes[1]
+	term := leader.Status().Term
+
+	// Node 3 granted the pre-vote while lapsed, then hears leader 1 again.
+	for _, message := range appendsTo(leader.Tick(), 3) {
+		deliverAll(t, nodes, []Message{message})
+	}
+	if status := nodes[3].Status(); status.Role != Follower || status.LeaderID != 1 || status.Term != term {
+		t.Fatalf("node 3 after leader append: %s, leader %d, term %d; want follower of 1 at %d", status.Role, status.LeaderID, status.Term, term)
+	}
+
+	stepIgnoredVote(t, nodes[3], votes[3])
+	stepIgnoredVote(t, leader, votes[1])
+	if status := leader.Status(); status.Role != Leader || status.Term != term {
+		t.Fatalf("leader 1 after vote request: %s at %d, want leader at %d", status.Role, status.Term, term)
+	}
+}
+
+// followerWithLongTimeout returns a cluster led by node 1 whose follower 3 has
+// just heard the leader and drew the longest election timeout,
+// ElectionTickMax-1, so its pre-vote lease outlasts its vote lease.
+func followerWithLongTimeout(t *testing.T) map[uint64]*Node {
+	t.Helper()
+	nodes := newTestCluster(t)
+	leader := electNodeOne(t, nodes)
+	longest := testConfig(3).ElectionTickMax - 1
+	for draws := 0; draws < 100 && nodes[3].electionTimeout != longest; draws++ {
+		deliverAll(t, nodes, leader.Tick().Messages)
+	}
+	if nodes[3].electionTimeout != longest || nodes[3].electionElapsed != 0 {
+		t.Fatalf("node 3 timer %d/%d, want 0/%d", nodes[3].electionElapsed, nodes[3].electionTimeout, longest)
+	}
+	return nodes
+}
+
+func TestVoteLeaseEndsAtMinimumElectionTimeout(t *testing.T) {
+	cfg := testConfig(3)
+	cases := []struct {
+		elapsed int
+		ignored bool
+	}{
+		{elapsed: 0, ignored: true},
+		{elapsed: cfg.ElectionTickMin - 1, ignored: true},
+		{elapsed: cfg.ElectionTickMin, ignored: false},
+		{elapsed: cfg.ElectionTickMax - 2, ignored: false},
+	}
+	for _, tc := range cases {
+		nodes := followerWithLongTimeout(t)
+		follower := nodes[3]
+		for i := 0; i < tc.elapsed; i++ {
+			follower.Tick()
+		}
+		status := follower.Status()
+		if status.Role != Follower || status.LeaderID != 1 {
+			t.Fatalf("elapsed %d: node 3 is %s with leader %d, want a follower of 1", tc.elapsed, status.Role, status.LeaderID)
+		}
+		term := status.Term
+		candidate := nodes[2].Status()
+
+		// The pre-vote check still uses the randomized timeout: rejected throughout.
+		preVote := follower.Step(Message{Type: MsgPreVote, From: 2, To: 3, Term: term + 1, LogIndex: candidate.LastLogIndex, LogTerm: term})
+		if len(preVote.Messages) != 1 || !preVote.Messages[0].Reject {
+			t.Fatalf("elapsed %d: pre-vote reply = %+v, want a rejection", tc.elapsed, preVote.Messages)
+		}
+
+		vote := Message{Type: MsgVote, From: 2, To: 3, Term: term + 1, LogIndex: candidate.LastLogIndex, LogTerm: term}
+		if tc.ignored {
+			stepIgnoredVote(t, follower, vote)
+			continue
+		}
+		update := follower.Step(vote)
+		if status := follower.Status(); status.Term != term+1 || status.VotedFor != 2 || status.VotesIgnoredInLease != 0 {
+			t.Fatalf("elapsed %d: term %d votedFor %d ignored %d, want %d, 2 and 0", tc.elapsed, status.Term, status.VotedFor, status.VotesIgnoredInLease, term+1)
+		}
+		if len(update.Messages) != 1 || update.Messages[0].Reject {
+			t.Fatalf("elapsed %d: vote reply = %+v, want one grant", tc.elapsed, update.Messages)
+		}
+	}
+}

@@ -247,42 +247,19 @@ counts/latencies. Compose provisions Prometheus and a Grafana Raft dashboard.
 
 ### Cluster benchmark
 
-`go run ./cmd/clusterbench` starts a fresh local three-node cluster, measures
-replicated writes, stops the leader, and records time until a write succeeds
-through the new majority leader. `-concurrency=N` uses N independent clients;
-each client preserves its own retry identity and request sequence.
+`go run ./cmd/clusterbench` starts a fresh in-process three-node cluster for
+each run and drives it with closed-loop clients, one `cluster.Client` each, for a
+warmup and then a measured window. It reports throughput, latency percentiles
+and Raft counters. `-clients 1,4,16` runs each client count on its own cluster,
+`-repetitions` repeats each one, and `-mode failover` also stops the leader
+after the window and times the first successful write. `go run
+./cmd/clusterbench -h` lists every flag.
 
-The following results are medians from five fresh-cluster runs per profile on
-2026-08-27. The environment was an Apple M4 with 16 GiB RAM, macOS 26.5.2,
-Go 1.26.1, loopback gRPC, local temporary directories, and 1,000 × 128-byte
-writes per run.
-
-| Profile | Throughput, median (range) | P50 | P95 | P99 | Failover, median (range) |
-|---|---:|---:|---:|---:|---:|
-| 1 client | 89.6 ops/s (88.1–91.8) | 11.26 ms | 16.06 ms | 17.26 ms | 296.42 ms (195.93–440.14) |
-| 4 clients | 28.6 ops/s (22.0–31.3) | 86.99 ms | 374.26 ms | 426.66 ms | 284.41 ms (234.76–292.81) |
-
-All 10 runs committed every measured write and completed the post-failure write.
-Throughput covers the write workload before leader termination; failover is a
-separate measurement. The four-client result shows that this implementation
-does not scale concurrent writes: the single Raft event loop and per-update
-durable syncs have no group-commit path, so queued writes increase disk sync and
-tail-latency pressure. These are local development results, not production
-capacity.
-
-Reproduce each profile with:
-
-```bash
-for run in 1 2 3 4 5; do
-  go run ./cmd/clusterbench -operations=1000 -value-size=128 -concurrency=1
-done
-
-for run in 1 2 3 4 5; do
-  go run ./cmd/clusterbench -operations=1000 -value-size=128 -concurrency=4
-done
-```
-
-Run the commands on the target machine before using the numbers in a résumé.
+Measured results and the commands that reproduce them are under
+[Results](#results). No failover result exists for the current engine; the
+earlier failover figures came from the pre-rewrite tool at `bd67696`.
+[`benchmarks/RUNBOOK.md`](benchmarks/RUNBOOK.md) sets the protocol: only runs on
+a dedicated Linux machine with `-official` count as results.
 
 ---
 
@@ -413,10 +390,209 @@ top of [`api/lsmdb/v1/lsmdb.proto`](api/lsmdb/v1/lsmdb.proto).
 
 ---
 
-## Benchmark results
+## Results
+
+Every figure in this section was measured on the same machine type, a Google
+Compute Engine e2-standard-4 VM (4 vCPUs) with a 100 GB network pd-ssd boot disk,
+running three Raft nodes in one process, with closed-loop clients writing 128-byte
+values, a 30 s measurement window after a 5 s warmup, and 5 repetitions per cell
+(each on a fresh cluster), with the arms interleaved. The runs used Go 1.26.1 on
+Linux, ext4 and `fsync(2)`. Every figure comes from three committed files, each
+produced on a separate VM instance:
+- [`benchmarks/results/2026-10-06-p13-compare.json`](benchmarks/results/2026-10-06-p13-compare.json);
+- [`benchmarks/results/2026-10-05-p12a-dup-ack-compare.json`](benchmarks/results/2026-10-05-p12a-dup-ack-compare.json);
+- [`benchmarks/results/2026-10-05-p12b-compare.json`](benchmarks/results/2026-10-05-p12b-compare.json).
+
+Figures are medians of the 5 runs, with [min, max] where shown. A difference
+counts only when the two arms' min–max ranges are disjoint. At 5 runs per arm,
+identical distributions give disjoint ranges by chance about 0.8% of the time.
+
+### Phases 12a–13 at 1, 4 and 16 clients
+
+All 60 runs in the phase-13 file were valid, with 0 elections in any measurement
+window and 0 failed operations.
+
+| Clients | Arm | Commit | Throughput (ops/s) | p50 (ms) | p99 (ms) | AppendEntries per committed entry | Entries per log sync |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 1 | storm | `bfa2a77` | 40.56 [39.48, 43.32] | 7.82 | 562.88 [543.07, 610.96] | 56.55 | 1.00 |
+| 1 | copy | `18369e8` | 233.08 [231.49, 245.28] | 4.18 | 5.77 [5.39, 6.06] | 4.46 | 1.00 |
+| 1 | prereq | `53b5d70` | 241.16 [212.89, 247.68] | 4.07 | 5.44 [5.31, 7.23] | 4.41 | 1.00 |
+| 1 | final | `a76f182` | 234.56 [220.16, 238.46] | 4.17 | 5.82 [5.61, 6.36] | 4.42 | 1.00 |
+| 4 | storm | `bfa2a77` | 23.59 [22.02, 27.71] | 59.72 | 669.59 [658.31, 674.97] | 166.47 | 1.14 |
+| 4 | copy | `18369e8` | 437.53 [411.50, 461.52] | 9.04 | 15.61 [14.37, 16.40] | 6.22 | 1.00 |
+| 4 | prereq | `53b5d70` | 504.54 [453.76, 536.36] | 7.66 | 11.43 [10.50, 13.21] | 1.68 | 1.51 |
+| 4 | final | `a76f182` | 559.30 [526.53, 593.73] | 6.87 | 10.57 [9.74, 10.91] | 1.65 | 1.62 |
+| 16 | storm | `bfa2a77` | 27.90 [27.42, 28.59] | 611.35 | 683.80 [675.51, 691.09] | 152.42 | 1.22 |
+| 16 | copy | `18369e8` | 419.36 [409.99, 442.40] | 34.09 | 75.44 [70.89, 78.41] | 6.22 | 1.00 |
+| 16 | prereq | `53b5d70` | 526.28 [507.50, 546.30] | 29.64 | 45.19 [43.34, 47.81] | 0.57 | 2.40 |
+| 16 | final | `a76f182` | 1531.68 [1477.11, 1575.73] | 8.78 | 19.67 [19.18, 20.22] | 0.41 | 6.31 |
+
+What each arm contains:
+- **storm (`bfa2a77`)** is the engine after phase 11 and before the phase-12a
+  fix. A duplicate-ack loop makes it send 56.55, 166.47 and 152.42 AppendEntries
+  per committed entry at 1, 4 and 16 clients.
+- **copy (`18369e8`)** adds the phase-12a duplicate-ack fix, phase 12b's 1 MiB
+  append cap, and phase 12b's change that stops copying the follower log on every
+  accepted append.
+- **prereq (`53b5d70`)** adds phase 12b hardening, the vote lease and the first
+  two phase-13 commits: at most one append carrying entries per follower, and a
+  write result that carries the entry's term.
+- **final (`a76f182`)** adds leader batching, follower coalescing and shared
+  read probes. The benchmark issues only writes, so it does not exercise the read
+  probes.
+
+The two counter columns:
+- **Entries per log sync** is log entries written divided by log syncs, summed
+  over the three nodes.
+- **AppendEntries per committed entry** counts every AppendEntries message the
+  leader hands to the transport, heartbeats included, divided by the entries
+  committed in the window. It drops below 1 when one message carries several
+  entries. From prereq on, a follower has at most one append carrying entries in
+  flight, and every entry proposed in the meantime travels in its next append.
+
+### Which change gained what
+
+Throughput median ratios between arms, all within the phase-13 file:
+
+| Step | 1 client | 4 clients | 16 clients |
+|---|---:|---:|---:|
+| storm → copy | ×5.75 | ×18.55 | ×15.03 |
+| copy → prereq | ×1.03, ranges overlap | ×1.15, ranges overlap | ×1.25 |
+| prereq → final | ×0.97, ranges overlap | ×1.11, ranges overlap | ×2.91 |
+| copy → final | ×1.01, ranges overlap | ×1.28 | ×3.65 |
+| storm → final | ×5.78 | ×23.71 | ×54.90 |
+
+Ratios without a note have disjoint ranges.
+- **Storm to final** is the cumulative effect of every change listed above.
+- **1 client:** no step after copy changes throughput.
+- **4 clients:** copy → prereq and prereq → final both have overlapping ranges.
+  Only final against copy is disjoint (×1.28), so the gain is not assigned to
+  either step.
+- **16 clients:**
+  - Prereq → final (×2.91) is credited to leader batching and follower
+    coalescing together; the counters do not separate the two. In the final
+    arm the leader wrote 4.03 entries per log sync and the followers 8.82 (1.13
+    and 2.06 at 4 clients).
+  - Copy → prereq (×1.25) spans phase 12b hardening, the vote lease and the
+    in-flight limit, and is not assigned to any one of them.
+- **Prereq already batches follower writes:** 1.51 entries per log sync at 4
+  clients and 2.40 at 16, against copy's 1.00.
+  - The mechanism: leader batching arrives only in the final arm, so at prereq
+    the batching happens on the followers. Entries that queue while a
+    follower's one append carrying entries is in flight reach it together, and
+    it writes them with one sync.
+  - The prereq arm predates the leader and follower split of the counters, so
+    1.51 and 2.40 are totals.
+
+### Where storm to copy came from
+
+Two earlier interleaved comparisons, run 2026-10-05 on the same machine type and
+disk, split the storm-to-copy step. Throughput in ops/s; each ratio compares
+arms within one file. `6d6dda7` is the phase-12a tip.
+
+| Clients | p12a: `bfa2a77` → `56267a1` (duplicate-ack fix) | p12b: `6d6dda7` → `8c8a317` (append cap) | p12b: `6d6dda7` → `18369e8` (no log copy) |
+|---:|---:|---:|---:|
+| 1 | 37.61 → 150.89 (×4.01) | 150.28 → 149.23 (×0.99, ranges overlap) | 150.28 → 226.89 (×1.51) |
+| 4 | 25.82 → 138.88 (×5.38) | 137.03 → 136.85 (×1.00, ranges overlap) | 137.03 → 440.83 (×3.22) |
+| 16 | 27.41 → 137.51 (×5.02) | 135.02 → 135.62 (×1.00, ranges overlap) | 135.02 → 408.93 (×3.03) |
+
+- **Duplicate-ack fix:** it cut AppendEntries per committed entry from 63.53,
+  148.70 and 154.62 to 5.07, 6.72 and 6.73 at 1, 4 and 16 clients.
+- **Append cap:** it bounds message size for large values. At 128-byte values it
+  changes nothing measurable.
+
+The storm and copy arms each ran in two comparisons. At every client count, the
+ranges in the two files overlap:
+
+| Arm | Clients | Earlier file (ops/s) | Phase-13 file (ops/s) |
+|---|---:|---:|---:|
+| storm `bfa2a77` | 1 | 37.61 [35.16, 42.51] (p12a) | 40.56 [39.48, 43.32] |
+| storm `bfa2a77` | 4 | 25.82 [23.39, 29.07] (p12a) | 23.59 [22.02, 27.71] |
+| storm `bfa2a77` | 16 | 27.41 [27.07, 28.18] (p12a) | 27.90 [27.42, 28.59] |
+| copy `18369e8` | 1 | 226.89 [211.66, 249.32] (p12b) | 233.08 [231.49, 245.28] |
+| copy `18369e8` | 4 | 440.83 [399.23, 452.82] (p12b) | 437.53 [411.50, 461.52] |
+| copy `18369e8` | 16 | 408.93 [391.43, 459.86] (p12b) | 419.36 [409.99, 442.40] |
+
+### Caveats
+
+- **Tail above p99 at 16 clients.**
+  - **Final:** p99.9 is 363.21 [352.13, 385.24] ms, and the per-run maximum is
+    407.60–416.05 ms.
+  - **Copy:** p99.9 is 174.64 [163.59, 184.05] ms, and the per-run maximum is
+    189.77–211.82 ms.
+  - So final's p99.9 and maximum are about twice copy's, even though its p99 is
+    19.67 ms against copy's 75.44. The cause is unknown, and no latency claim is
+    made beyond p99.
+- **Deadline failures.** One final-arm run (16 clients, repetition 3) recorded 5
+  Raft send failures on the 500 ms per-message deadline, against an expected 0.
+  It had 0 elections and 0 failed operations.
+- **Platform dependence.** The gain depends on what a log sync costs. In the
+  phase-13 file, the 4 KiB fsync p50 on the instance's network disk was
+  1.40–2.98 ms (median 1.72), across 120 samples taken before and after each run.
+  Another disk, another platform or a multi-machine cluster would give different
+  numbers.
+- **Large values.** A3, `TestLargeValueWritesKeepOneLeader`, has 4 clients write
+  24 values of 2.5 MiB.
+  - On the phase-13 VM, 5 runs per arm
+    (`benchmarks/results/2026-10-06-p13-large-*.txt`):
+    - **copy, prereq and final:** each passed 5 of 5, with 0 elections and 0
+      failed writes.
+    - **storm:** failed 5 of 5, with 20, 20, 21, 12 and 23 elections. No write
+      failed, but in 4 of those runs 1 or 2 nodes did not answer a status
+      request after settling.
+  - It held with 0 elections on the VM (e2-standard-4, pd-ssd) and on the Mac.
+  - No claim is made for slower or shared machines: GitHub-hosted runners showed
+    2–3 elections in 2 of 4 runs, with no failed writes.
+  - CI skips it unless `LSMDB_RACE_STRESS=1` is set.
+- **Attempt 1.** The first attempt at the phase-13 comparison stopped at run 43 of
+  60, before that run's measurement window. A port race in the benchmark harness
+  stopped it.
+  - It was re-run once, as an approved exception.
+  - The partial file is committed as
+    [`2026-10-06-p13-compare-attempt1.json`](benchmarks/results/2026-10-06-p13-compare-attempt1.json),
+    labeled INCOMPLETE, and is not analyzed.
+- **No linearizability claim.** No linearizability checker exists. Reads are
+  covered by tests only.
+
+### Reproduce
+
+[`benchmarks/RUNBOOK.md`](benchmarks/RUNBOOK.md) has the full procedure:
+- **Setup:** sections 1 and 2 cover the machine, `$BENCH`, `$MACHINE` and `$DISK`.
+- **Commands:** section 3e has all three comparisons, with the checks and
+  summaries for each. See
+  [3e. Phase 12a, 12b and 13 comparisons](benchmarks/RUNBOOK.md#3e-phase-12a-12b-and-13-comparisons).
+
+The phase-13 comparison:
+
+```bash
+go run scripts/bench_compare.go run \
+  -arm storm=bfa2a77 -arm copy=18369e8 -arm prereq=53b5d70 -arm final=a76f182 \
+  -clients 1,4,16 -repetitions 5 -work "$BENCH/p13b" \
+  -out "$BENCH/p13-compare.json" \
+  -machine-type "$MACHINE" -disk-type "$DISK" \
+  -- -official -warmup 5s -duration 30s -snapshot-threshold 1000000 -data-dir "$BENCH"
+go run scripts/vm_smoke_check.go \
+  -expect storm=bfa2a77 -expect copy=18369e8 -expect prereq=53b5d70 -expect final=a76f182 \
+  "$BENCH/p13-compare.json"
+go run scripts/bench_compare.go summarize -ref copy "$BENCH/p13-compare.json"
+go run scripts/bench_compare.go summarize -ref prereq "$BENCH/p13-compare.json"
+```
+
+---
+
+## Earlier embedded-engine results (older harness, not re-measured)
 
 Measured on GCP e2-standard-2 (2 vCPU, 8 GB RAM, x86_64), Debian Linux 6.1, Go 1.22. Each workload runs against a fresh database.
-SQLite uses `journal_mode=WAL` and `synchronous=NORMAL` — see [Methodology](#benchmark-methodology) for why.
+SQLite uses `journal_mode=WAL` and `synchronous=NORMAL` — see [Methodology](#embedded-benchmark-methodology) for why.
+
+These figures come from the `cmd/bench` harness at `8542980` (2026-05-26) and are
+recorded in [`results.json`](results.json). They were not re-measured with the
+current harness.
+- **Single run:** each figure comes from one run with no repetitions, so no
+  variance is known.
+- **Ops/sec:** for every workload except G, it is the operation count divided by
+  the sum of the per-operation latencies, so time between operations is not
+  counted. Workload G divides by wall-clock time.
 
 ```
 Workload              Engine  Ops/sec  P50(ms)  P95(ms)  P99(ms)  Disk(KB)  BloomSkips  ReadAmp
@@ -445,17 +621,13 @@ H: Range Scans        SQLite    6,021   0.148    0.252    0.480     1,072       
 
 **Interpretation.** On x86_64 Linux, the LSM engine's write advantage is 2.4–3.8× on workloads A and B (34k–52k vs 14k ops/sec), because writes land in the MemTable and WAL — sequential, in-memory operations — rather than updating a B-tree page in place. The update-heavy workload (E) is the extreme case: all 10 hot keys remain in the MemTable for the entire run, so compaction never fires and LSM reaches 272k ops/sec — 11× faster than SQLite's 24k. Point lookups (D) reach near-parity: 61k LSM vs 63k SQLite, as Bloom filters eliminate most unnecessary SSTable reads.
 
-Concurrent reads (G) reveal a scaling asymmetry: SQLite throughput grows from 65k to 75k ops/sec as goroutine count increases from 8 to 32, while LSM plateaus at 38k–40k. The bottleneck is the MemTable's internal RWMutex, which serialises concurrent `SortedEntries` calls even for read-only paths.
+Concurrent reads (G) reveal a scaling asymmetry: SQLite throughput grows from 65k to 75k ops/sec as goroutine count increases from 8 to 32, while LSM plateaus at 38k–40k.
 
 Range scans (H) favour SQLite by 2.7× (6k vs 2.2k ops/sec). The LSM path must collect candidates from all SSTables, deduplicate by sequence number, and sort the results; a B-tree leaf-page scan is a simpler, cache-friendlier operation for this access pattern.
 
-The Bloom filter performs as expected: 6,983 SSTable checks were skipped on workload D (99% skip rate), confirming that miss-path reads avoid disk I/O in the common case.
+### Embedded benchmark methodology
 
----
-
-## Benchmark methodology
-
-- **SQLite pragmas:** `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL`. Both engines accept a narrow crash window (LSM only fsyncs on SSTable flush; SQLite only fsyncs on WAL checkpoint). This keeps durability levels equivalent.
+- **SQLite pragmas:** `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL`. Both engines accept a narrow crash window (LSM only fsyncs on SSTable flush; SQLite only fsyncs on WAL checkpoint).
 - **SQLite write batching:** Pre-population steps use batched transactions of 100 writes. Timed write workloads (A, B, C, E) use per-operation transactions to match LSM's per-write granularity.
 - **Reproducibility:** All key and value sequences use fixed seeds. Running `go run ./cmd/bench/...` produces the same workload on any machine.
 - **Operation counts:** A/B = 10,000 writes; C = 5,000 pairs; D = 5,000 lookups after 5,000 writes; E = 10 keys × 1,000 updates; F = 5,000 writes + 2,500 deletes + 5,000 reads.
@@ -466,9 +638,16 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 ## Limitations
 
 - **Embedded single writer.** `db.mu` serialises embedded writes.
-- **No Raft group commit.** Concurrent client proposals share one event loop and
-  each persistence update syncs independently, so concurrent write throughput is
-  currently worse than the single-client path.
+- **Replicated writes still run through one event loop.** Leader batching and
+  follower coalescing (D022) write many entries per log sync. Several write-path
+  limits remain:
+  - the leader syncs its log before it sends;
+  - each follower has at most one append carrying entries in flight;
+  - committed entries are applied one index at a time;
+  - snapshots, flushes and compactions run inside the event loop.
+
+  The measured gain is for one VM and disk (see [Results](#results)), and the
+  tail above p99 at 16 clients is unexplained.
 - **No compression.** Keys and values are written verbatim. There is no snappy/zstd layer.
 - **Flat compaction only.** All SSTables are merged into one (size-tiered, single level). There is no L0→L1→L2 leveled strategy; read amplification is bounded only by `CompactionThreshold`.
 - **Orphan cleanup is deferred.** Manifest publication makes flush/compaction replacement atomic, but a crash before publication can leave an ignored SSTable file that is not yet garbage-collected.
@@ -492,7 +671,12 @@ The Bloom filter performs as expected: 6,983 SSTable checks were skipped on work
 - Leveled compaction (L0→L1→L2) to bound read amplification without growing a single large SSTable
 - Block compression (snappy or zstd) for the SSTable data section
 - Concurrent readers with a read-lock-free SSTable list snapshot
-- Group commit and proposal batching for concurrent replicated-write throughput
+- Replicated-write path after group commit:
+  - asynchronous leader persistence;
+  - more than one append carrying entries in flight per follower;
+  - batched apply;
+  - snapshots, flushes and compactions off the Raft event loop.
+- A linearizability checker for the replicated API
 - Optional stale follower reads without changing the default linearizable API
 - Consistent-hash sharding or multi-Raft with explicit replica placement
 - TLS, authentication, integrated service discovery, and rolling upgrades

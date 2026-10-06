@@ -1,6 +1,6 @@
 # Distributed KV Cluster: Task Tracker
 
-Last updated: 2026-10-05
+Last updated: 2026-10-06
 
 ## Current Phase
 
@@ -332,8 +332,21 @@ here and "phase 12c" in D019 name the same prerequisite work.
   - At most 5 copies of a chunk to a silent follower in any 25 ticks.
   - A3 runs under `-race` again: 10 of 10, and 10 of 10 under load.
 - [x] (c) Tracked docs: D022 accepted with its as-built details; this tracker.
-- [ ] (d) Leader batching.
-- [ ] (e) Follower coalescing.
+- [x] (d) Leader batching (`9cad487`).
+  - `Node.ProposeBatch` appends queued proposals in input order with one
+    update: one sync and one append per follower.
+  - The runtime drains without blocking: up to 256 proposals, 1 MiB
+    accounted (len + 32), or one queue of events. No linger.
+  - In-memory cluster: 2.06–2.72 leader entries per sync at 8 proposers and
+    4.12–5.48 at 16 (10 of 10 runs).
+- [x] (e) Follower coalescing (`333eb24`).
+  - Queued appends from the same leader are persisted with one sync. The
+    merge stops at any update with hard state, truncation, snapshot or role
+    change, which is then persisted alone.
+  - Every coalesced append is answered, and none before its persist.
+  - The 3-repetition secondary check failed its 25% rule at 4 clients; the
+    one-pass 10-repetition recheck passed (see the verification log). The
+    two-mode throughput at 4 clients on the Mac is unexplained.
 - [ ] (f) Shared read probes. **Stop for review before any VM work.**
 - [ ] VM comparison, after review and approval of the VM:
   - arms: storm `bfa2a77`, copy `18369e8`, prerequisite `53b5d70`, new;
@@ -567,6 +580,76 @@ after phase 13.
     - Observation: the prerequisite alone already batches follower syncs.
       This is why the VM run has a prerequisite arm.
 
+- 2026-10-06, phase 13 (d) `9cad487`:
+  - Failing first, on the pre-change engine with a `ProposeBatch` stub: the
+    three `ProposeBatch` tests, five runtime batch tests and
+    `TestLeaderBatchesConcurrentProposals` (1.00 entries per sync at 8 and
+    16 proposers, want > 1). Four guards pass on both: own index per
+    proposal, leader change mid-batch, follower drain, retried client
+    writes.
+  - Each of eleven mutations fails its named test: batch cap 1; no byte
+    cap; no count cap; complete only the last index; a role change fails
+    only the first waiter; `ErrNotLeader` to the first only; complete before
+    persist; reject the whole batch on an oversize item; deferred events
+    LIFO; reversed input order; no dedup check.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+  - Secondary Mac check (not a result, not committed): `53b5d70` against
+    `9cad487`, 1, 4 and 16 clients, 3 repetitions interleaved, 5 s warmup,
+    10 s windows. Load average 2.8 at the start, 4.8 at the end.
+    - All 18 runs valid: 0 elections, 0 failed operations. **PASS.**
+
+    | clients | ops/s median, before -> after | entries per sync |
+    |---:|---|---|
+    | 1 | 109.4 -> 102.6 (−6.2%) | 1.00 -> 1.00 |
+    | 4 | 167.8 -> 183.6 (+9.4%) | 1.54 -> 1.69 |
+    | 16 | 225.6 -> 639.0 (+183%) | 2.41 -> 6.77 |
+
+- 2026-10-06, phase 13 (e) `333eb24`:
+  - Failing first: `TestQueuedAppendsArePersistedTogether`,
+    `TestCoalescingStopsAtHardState` and
+    `TestPersistFailureFailsEveryMergedAppend`. Two guards pass on both:
+    every coalesced response is sent, and none before the merged persist.
+  - Each of five mutations fails its named test: no coalescing; merge
+    across a term change; keep only the last ack per destination; send
+    before persisting; report the failure to the first append only.
+    - The first "merge across hard state" mutation was equivalent: adopting
+      a higher term also sets `RoleChanged`, which stopped the merge anyway.
+      It was redefined to ignore both.
+    - The send-before-persist mutation first hung the test at cleanup (a
+      held persist blocks `Close`); the gate store now releases held
+      persists at cleanup.
+  - After the commit: gofmt clean, `go vet ./...`, `go test ./...` and
+    `-race` all pass, 17 ok each.
+  - Secondary Mac check (not a result, not committed): `9cad487` against
+    `333eb24`, same settings as (d). Load average 3.4 at the start, 3.1 at
+    the end. All 18 runs valid. **FAIL** at 4 clients: median 258.5 ->
+    187.8 ops/s (−27.4%), past the 25% rule. 1 client +1.8%, 16 clients
+    −4.0%. Entries per sync 1.68 -> 1.69. Not re-run; stopped for a
+    decision.
+  - Recheck, one pass of a rule set before running: 4 clients, 10
+    repetitions per arm, 5 s warmup, 10 s windows, secondary label. Pass if
+    the median ratio is >= 0.85 or the ranges overlap; fail if the ratio is
+    < 0.85 and the ranges are disjoint.
+    - Order: `bench_compare` rotates the first arm with each repetition,
+      so the runs went A B, B A, A B, ... and not A B A B as asked.
+    - 1-minute load average 1.6–3.5 at run starts, 3.1 at the end.
+    - `9cad487`: 10 of 10 valid, median 194.9 ops/s, range 174.7–269.0.
+    - `333eb24`: 9 of 10 valid, median 182.2, range 173.5–268.1. One window
+      had 2 elections (term 1 -> 3) and is excluded; 0 failed operations.
+    - Ratio 0.935, ranges overlap. **PASS.**
+    - Entries per sync per run: 1.63–1.72 (`9cad487`) and 1.56–1.78
+      (`333eb24`).
+  - Observation, unresolved: throughput at 4 clients on this Mac falls in
+    two modes, about 160–205 and about 240–280 ops/s, in every arm from the
+    prerequisite `53b5d70` on (the rank-14 arm `6aa09ce` ran 101–106 in its
+    3 runs). The same `9cad487` binary had a median of 183.6 in the (d)
+    check and 258.5 in the (e) check. In the recheck the high mode came in
+    4 of 10 `9cad487` runs and 1 of 9 `333eb24` runs, all within runs
+    12–17. Entries per sync do not differ between the modes. Neither the
+    cause nor whether coalescing changes the mode frequency is known; this
+    check cannot separate them.
+
 ## Blockers
 
 None. Runtime discovery is an operator-managed JSON directory; an integrated,
@@ -577,9 +660,9 @@ authenticated registry remains deferred.
 Vote lease (D021) is done on `phase-12b-vote-lease`. Phase 12b hardening item
 3 (the log format guard) comes last and is optional, and is not started.
 
-Phase 13 (D022, accepted): (a) to (c) are done; (d) leader batching, (e)
-follower coalescing and (f) shared read probes come next. Stop after (f) for
-review before any VM work.
+Phase 13 (D022, accepted): (a) to (e) are done. Next: a leader and follower
+split of the sync counters, a test of cap + 1 proposals on the default queue,
+then (f) shared read probes. Stop after (f) for review before any VM work.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

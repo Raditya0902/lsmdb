@@ -195,8 +195,11 @@ Details: `dev/active/phase-12b-append-size-and-log-copy/`. Decision: D019.
 Details: `dev/active/phase-12b-hardening/`. Decision: D020 (accepted, gated).
 Items in commit order:
 
-- [ ] The large-value test logs every node's term and commit index before
+- [x] The large-value test logs every node's term and commit index before
   failing.
+- [ ] Test timing under the race detector: the in-memory chunking test waits for
+  a stable leader, and the two real-time 12b tests scale their ticks under a
+  `race` build tag only. No assertion is loosened.
 - [ ] Flush and compaction counted and timed in the engine; per-window deltas in
   clusterbench JSON (`bench_compare summarize` unchanged).
 - [ ] `Runtime.Close` returns after the runtime has stopped itself (still nil).
@@ -300,6 +303,20 @@ Items in commit order:
   - After `9213d83`, `f895b7e`, `0c9298e` and the results commit `ca35b90`: the
     same suite passes.
 
+- 2026-10-05, phase 12b hardening:
+  - After commit 0 (`966e951`, docs only): gofmt (no Go files), `go vet ./...`
+    and `go test -count=1 ./...` pass. `go test -count=1 -race ./...` FAILED in
+    `lsmdb/cluster` only: `TestMemoryClusterShipsLargeEntriesInCappedChunks`
+    ("write 0: raft node is not leader") and `TestLargeValueWritesKeepOneLeader`
+    (1 election, commit 26 on all nodes). The code equals `ca35b90`.
+  - Re-run per the approved rule: `go test -race -count=10 ./cluster` passes, 10
+    of 10 (139.9 s). Earlier, the two tests alone passed 20 of 20 under `-race`.
+  - Item 1, on an `8c8a317` worktree under `-race`: the old test fails with only
+    `status of node 1: context deadline exceeded`; the new one logs all three
+    nodes (leader at commit 18, both followers' Status timing out, 0 elections
+    among the 1 node that answered). The new file vets and lists on `6d6dda7`
+    and `8c8a317`, and passes on the tip with and without `-race`.
+
 ## Blockers
 
 None. Runtime discovery is an operator-managed JSON directory; an integrated,
@@ -307,9 +324,8 @@ authenticated registry remains deferred.
 
 ## Next Task
 
-Phase 12b hardening: commit 0 (D020 and the tracker), then items 1, 2, 5, 4, 6
-and 3 as separate commits, tests first, as in
-`dev/active/phase-12b-hardening/plan.md`.
+Phase 12b hardening: the test-timing commit, then items 2, 5, 4, 6 and 3 as
+separate commits, tests first, as in `dev/active/phase-12b-hardening/plan.md`.
 
 The phase-11, phase-10, phase-12a and phase-12b branches are to be pushed as a
 stack and merged with merge commits, in that order.

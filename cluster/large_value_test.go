@@ -49,19 +49,73 @@ func addressList(addresses map[uint64]string) []string {
 	return []string{addresses[1], addresses[2], addresses[3]}
 }
 
-func nodeStatuses(t *testing.T, nodes map[uint64]*Node) map[uint64]raft.Status {
-	t.Helper()
-	statuses := make(map[uint64]raft.Status, len(nodes))
+// statusResult is one node's Raft status, or the error its Status call
+// returned.
+type statusResult struct {
+	status raft.Status
+	err    error
+}
+
+// pollStatuses asks every node for its status, with a 1 s timeout each, and
+// keeps every answer and every error so a failing test can still log them.
+func pollStatuses(nodes map[uint64]*Node) map[uint64]statusResult {
+	results := make(map[uint64]statusResult, len(nodes))
 	for id, node := range nodes {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		current, err := node.Status(ctx)
 		cancel()
-		if err != nil {
-			t.Fatalf("status of node %d: %v", id, err)
+		results[id] = statusResult{status: current, err: err}
+	}
+	return results
+}
+
+func nodeStatuses(t *testing.T, nodes map[uint64]*Node) map[uint64]raft.Status {
+	t.Helper()
+	statuses := make(map[uint64]raft.Status, len(nodes))
+	for id, result := range pollStatuses(nodes) {
+		if result.err != nil {
+			t.Fatalf("status of node %d: %v", id, result.err)
 		}
-		statuses[id] = current
+		statuses[id] = result.status
 	}
 	return statuses
+}
+
+// answered returns the statuses of the nodes whose Status call succeeded.
+func answered(results map[uint64]statusResult) map[uint64]raft.Status {
+	statuses := make(map[uint64]raft.Status, len(results))
+	for id, result := range results {
+		if result.err == nil {
+			statuses[id] = result.status
+		}
+	}
+	return statuses
+}
+
+// settled reports whether every node answered and all commit indexes match.
+func settled(results map[uint64]statusResult) bool {
+	statuses := answered(results)
+	return len(statuses) == len(results) && equalCommitIndexes(statuses)
+}
+
+// logStatuses logs one line per node: its role, terms and indexes, or the
+// error its Status call returned.
+func logStatuses(t *testing.T, before, after map[uint64]statusResult) {
+	t.Helper()
+	for id := uint64(1); id <= 3; id++ {
+		switch {
+		case before[id].err != nil:
+			t.Logf("node %d: status before the writes: %v", id, before[id].err)
+		case after == nil:
+			t.Logf("node %d: role %s, term %d, commit %d, last index %d before the writes",
+				id, before[id].status.Role, before[id].status.Term, before[id].status.CommitIndex, before[id].status.LastLogIndex)
+		case after[id].err != nil:
+			t.Logf("node %d: term %d before the writes; status after: %v", id, before[id].status.Term, after[id].err)
+		default:
+			t.Logf("node %d: role %s, term %d -> %d, commit %d, last index %d",
+				id, after[id].status.Role, before[id].status.Term, after[id].status.Term, after[id].status.CommitIndex, after[id].status.LastLogIndex)
+		}
+	}
 }
 
 func maxTerm(statuses map[uint64]raft.Status) uint64 {
@@ -89,7 +143,11 @@ func TestLargeValueWritesKeepOneLeader(t *testing.T) {
 	const clients, writes, valueSize = 4, 24, 5 << 19
 	nodes, addresses := startGRPCCluster(t)
 	waitForLeader(t, nodes, 0)
-	before := nodeStatuses(t, nodes)
+	before := pollStatuses(nodes)
+	if len(answered(before)) != len(before) {
+		logStatuses(t, before, nil)
+		t.Fatalf("only %d of %d nodes reported a status before the writes", len(answered(before)), len(before))
+	}
 	value := bytes.Repeat([]byte{'v'}, valueSize)
 
 	var wg sync.WaitGroup
@@ -122,24 +180,31 @@ func TestLargeValueWritesKeepOneLeader(t *testing.T) {
 	}
 
 	// Followers get a short settling time to reach the leader's commit index.
-	after := nodeStatuses(t, nodes)
-	for deadline := time.Now().Add(3 * time.Second); !equalCommitIndexes(after) && time.Now().Before(deadline); {
+	// Polling continues until the deadline whatever the Status errors, and every
+	// node's result is logged before any check fails the test.
+	after := pollStatuses(nodes)
+	for deadline := time.Now().Add(3 * time.Second); !settled(after) && time.Now().Before(deadline); {
 		time.Sleep(20 * time.Millisecond)
-		after = nodeStatuses(t, nodes)
+		after = pollStatuses(nodes)
 	}
-	for id := uint64(1); id <= 3; id++ {
-		t.Logf("node %d: role %s, term %d -> %d, commit %d, last index %d",
-			id, after[id].Role, before[id].Term, after[id].Term, after[id].CommitIndex, after[id].LastLogIndex)
+	logStatuses(t, before, after)
+	responding := answered(after)
+	var elections uint64
+	if termAfter, termBefore := maxTerm(responding), maxTerm(answered(before)); termAfter > termBefore {
+		elections = termAfter - termBefore
 	}
-	elections := maxTerm(after) - maxTerm(before)
-	t.Logf("%d of %d writes failed; %d elections", failed, writes, elections)
+	t.Logf("%d of %d writes failed; %d elections among the %d of %d nodes that answered",
+		failed, writes, elections, len(responding), len(nodes))
 	if failed != 0 {
 		t.Errorf("%d writes failed", failed)
 	}
 	if elections != 0 {
 		t.Errorf("%d elections during the large-value writes, want 0", elections)
 	}
-	if !equalCommitIndexes(after) {
+	if len(responding) != len(nodes) {
+		t.Errorf("%d of %d nodes did not report a status after settling", len(nodes)-len(responding), len(nodes))
+	}
+	if len(responding) == len(nodes) && !equalCommitIndexes(responding) {
 		t.Errorf("commit indexes differ after settling: a follower is lagging")
 	}
 }

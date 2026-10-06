@@ -515,8 +515,19 @@ Consequences:
 
 ### D022 — One outstanding append per follower, then leader batches and follower coalescing
 
-Status: proposed 2026-10-05 (phase 13 Step 1). Details and line numbers at
-`d0e7c26` are in `dev/active/phase-13-group-commit/`.
+Status: accepted 2026-10-05.
+- **Implemented so far:** rank 14 in `6aa09ce` and the in-flight limit in
+  `53b5d70`. Together they form the prerequisite arm.
+- **Not yet built:** leader batching, follower coalescing and shared read
+  probes follow as (d) to (f).
+- **Details:** in `dev/active/phase-13-group-commit/`, with line numbers at
+  `d0e7c26`.
+
+Approved with these values:
+- the resend timeout is 5 ticks;
+- the caps are 256 entries and 1 MiB on leader and followers alike;
+- the follower cap bounds one persist, not one message;
+- rank 14 is part of the prerequisite.
 
 Context:
 
@@ -535,7 +546,7 @@ Context:
   leave a lost append unsent once proposals stop, because a non-advancing ack
   sends nothing (`:699-704`).
 
-Decision (proposed):
+Decision:
 
 1. **In-flight limit, lite (this is D019's phase 12c).**
    - At most one entry-carrying append is outstanding per follower.
@@ -575,7 +586,34 @@ Decision (proposed):
      carry ReadIndex contexts), then every RPC completes.
 5. **Reads drained together share one probe context.**
 
-Consequences (expected; Step 9 records what was measured):
+As built in `53b5d70` (where it differs from the proposal):
+
+- **Waiting instead of empty appends:** a proposal sends nothing to a
+  follower with an outstanding append, rather than an entry-less append, and
+  the D018 follow-up is skipped when the commit advance just carried the next
+  chunk. Entry-less appends are sent only where they carry something:
+  heartbeats, commit advances and read probes.
+- **Resend timing:** the resend goes out on the tick the append expires. If
+  no heartbeat fires on that tick (`HeartbeatTicks` > 1), it is sent on its
+  own, so the bound does not depend on `HeartbeatTicks`.
+- **Copies are counted per tick.** A send between two ticks belongs to the
+  earlier tick. In wall time, the first copy of a chain can overlap a sixth
+  copy by the part of a tick between its send and the next tick, and the
+  count follows tick drift as D021's lease does.
+- **Tests that pinned D018/D019's heartbeat path now measure the resend:**
+  - the catch-up bounds;
+  - the cap tests that read the first message after a loss;
+  - the origin tags (no proposal appends while the no-op is outstanding);
+  - the joint consensus test, which ticks until node 3's lost append is
+    re-sent;
+  - the metrics test, which waits for both followers to match before its
+    Put.
+- **A3 under `-race`:**
+  - 10 of 10 passed at ambient load and 10 of 10 with 8 busy processes, with
+    0 elections and 0 failed writes in each run;
+  - the `LSMDB_RACE_STRESS` skip and its `raceEnabled` constant are removed.
+
+Consequences (expected; the results step records what was measured):
 
 - **Catch-up:**
   - Delivered rounds chain on acks as today.
@@ -606,8 +644,18 @@ Consequences (expected; Step 9 records what was measured):
   - reject echo;
   - an ordered sender.
 - **Acceptance:** the pre-registered VM thresholds in the phase plan
-  (P1–P6), on three arms: storm `bfa2a77`, copy `18369e8` and the phase 13
-  tip, at 1, 4 and 16 clients.
+  (P1–P7), at 1, 4 and 16 clients, on four arms:
+  - storm `bfa2a77`, which shows the cumulative arc only and enters no
+    threshold;
+  - copy `18369e8`;
+  - the prerequisite arm `53b5d70`, which splits the gain and enters no
+    threshold;
+  - the phase 13 tip.
+
+  P7 requires the cluster tests, the in-memory concurrency test and A3 to
+  pass at the final arm. A throughput gain with a correctness regression is
+  a miss. Phase 13 claims no linearizability coverage; the checker is
+  separate work after phase 13.
 
 ## Decision Changes
 

@@ -148,6 +148,19 @@ func TestNodeMetricSnapshotExposesReplicationCounters(t *testing.T) {
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// A proposal sends nothing to a follower whose earlier append is still in
+	// flight (D022), so wait until both followers hold the leader's whole log.
+	for caughtUp := false; !caughtUp; {
+		status, err := nodes[leaderID].Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caughtUp = status.CommitIndex > 0
+		for _, id := range []uint64{1, 2, 3} {
+			caughtUp = caughtUp && status.MatchIndex[id] == status.LastLogIndex
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if _, err := client.Put(ctx, []byte("k"), []byte("v")); err != nil {
 		t.Fatal(err)
 	}

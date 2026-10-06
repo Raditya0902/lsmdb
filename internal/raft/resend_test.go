@@ -155,7 +155,11 @@ func TestRejectionStillProbesWithLowerNextIndex(t *testing.T) {
 	})
 }
 
-func TestFollowerCatchesUpThroughHeartbeatAfterLoss(t *testing.T) {
+// TestFollowerCatchesUpAfterLossWithinResendBound pins D022's catch-up path:
+// with entry-less heartbeats, a lost append, ack or resend is recovered by the
+// resend after testResendTicks ticks, so k losses cost at most
+// (k + 1) x testResendTicks ticks (D018's bound with D022's timeout).
+func TestFollowerCatchesUpAfterLossWithinResendBound(t *testing.T) {
 	t.Run("append never delivered", func(t *testing.T) {
 		nodes := newTestCluster(t)
 		leader := electNodeOne(t, nodes)
@@ -167,9 +171,11 @@ func TestFollowerCatchesUpThroughHeartbeatAfterLoss(t *testing.T) {
 		if leader.Status().CommitIndex != 1 || nodes[2].Status().LastLogIndex != 1 {
 			t.Fatalf("after the loss: commit %d, follower last %d; want 1 and 1", leader.Status().CommitIndex, nodes[2].Status().LastLogIndex)
 		}
-		route(t, nodes, leader.Tick().Messages, isolated(3))
-		if commit := leader.Status().CommitIndex; commit != 2 {
-			t.Fatalf("commit after one heartbeat = %d, want 2", commit)
+		for tick := 1; tick <= testResendTicks; tick++ {
+			route(t, nodes, leader.Tick().Messages, isolated(3))
+			if commit := leader.Status().CommitIndex; tick < testResendTicks && commit != 1 || tick == testResendTicks && commit != 2 {
+				t.Fatalf("commit after %d ticks = %d; want 2 only at the resend, tick %d", tick, commit, testResendTicks)
+			}
 		}
 	})
 
@@ -189,15 +195,18 @@ func TestFollowerCatchesUpThroughHeartbeatAfterLoss(t *testing.T) {
 		if match, commit := leader.Status().MatchIndex[2], leader.Status().CommitIndex; match != 1 || commit != 1 {
 			t.Fatalf("after the lost ack: matchIndex[2] %d commit %d, want 1 and 1", match, commit)
 		}
-		route(t, nodes, leader.Tick().Messages, isolated(3))
+		for tick := 1; tick <= testResendTicks; tick++ {
+			route(t, nodes, leader.Tick().Messages, isolated(3))
+		}
 		if match, commit := leader.Status().MatchIndex[2], leader.Status().CommitIndex; match != 2 || commit != 2 {
-			t.Fatalf("after one heartbeat: matchIndex[2] %d commit %d, want 2 and 2", match, commit)
+			t.Fatalf("after %d ticks: matchIndex[2] %d commit %d, want 2 and 2", testResendTicks, match, commit)
 		}
 	})
 
-	t.Run("append and next k heartbeats lost", func(t *testing.T) {
+	t.Run("append and next k resends lost", func(t *testing.T) {
 		// Node 3 stays connected so the leader keeps its quorum while follower 2
 		// hears nothing; catch-up is measured on follower 2's matchIndex.
+		// HeartbeatTicks 2 shows the bound does not depend on it.
 		const heartbeatTicks, k = 2, 3
 		nodes := make(map[uint64]*Node)
 		for id := uint64(1); id <= 3; id++ {
@@ -219,14 +228,14 @@ func TestFollowerCatchesUpThroughHeartbeatAfterLoss(t *testing.T) {
 		if match := leader.Status().MatchIndex[2]; match != 1 {
 			t.Fatalf("matchIndex[2] = %d after the lost append, want 1", match)
 		}
-		heartbeats, caughtUpAt := 0, 0
-		for tick := 1; tick <= 4*(k+1)*heartbeatTicks && caughtUpAt == 0; tick++ {
+		resends, caughtUpAt := 0, 0
+		for tick := 1; tick <= 4*(k+1)*testResendTicks && caughtUpAt == 0; tick++ {
 			messages := leader.Tick().Messages
-			if len(appendsTo(Update{Messages: messages}, 2)) > 0 {
-				heartbeats++
+			if len(entryAppendsTo(Update{Messages: messages}, 2)) > 0 {
+				resends++
 			}
 			lose := func(Message) bool { return false }
-			if heartbeats <= k {
+			if resends <= k {
 				lose = toFollower2
 			}
 			route(t, nodes, messages, lose)
@@ -238,15 +247,15 @@ func TestFollowerCatchesUpThroughHeartbeatAfterLoss(t *testing.T) {
 			}
 		}
 		if caughtUpAt == 0 {
-			t.Fatalf("follower never caught up after %d lost heartbeats", k)
+			t.Fatalf("follower never caught up after %d lost resends", k)
 		}
-		if bound := (k + 1) * heartbeatTicks; caughtUpAt > bound {
-			t.Fatalf("caught up at tick %d, beyond the D018 bound (k+1) x HeartbeatTicks = %d", caughtUpAt, bound)
+		if bound := (k + 1) * testResendTicks; caughtUpAt > bound {
+			t.Fatalf("caught up at tick %d, beyond the bound (k+1) x %d = %d", caughtUpAt, testResendTicks, bound)
 		}
-		if heartbeats != k+1 {
-			t.Fatalf("caught up on heartbeat %d, want %d: the first %d were lost", heartbeats, k+1, k)
+		if resends != k+1 {
+			t.Fatalf("caught up on resend %d, want %d: the first %d were lost", resends, k+1, k)
 		}
-		t.Logf("caught up at tick %d; bound (k+1) x HeartbeatTicks = %d", caughtUpAt, (k+1)*heartbeatTicks)
+		t.Logf("caught up at tick %d; bound (k+1) x %d = %d", caughtUpAt, testResendTicks, (k+1)*testResendTicks)
 	})
 }
 

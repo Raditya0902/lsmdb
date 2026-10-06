@@ -29,14 +29,16 @@ func TestAppendOriginTags(t *testing.T) {
 		{"leader election no-op", func() Update {
 			return node.Step(Message{Type: MsgVoteResponse, From: 2, To: 1, Term: 1})
 		}, map[MessageOrigin]int{OriginOther: 2}},
+		// D022: the no-op is still in flight to both peers, so proposals wait.
 		{"proposal", func() Update {
 			node.Propose([]byte("a"))
 			_, update, _ := node.Propose([]byte("b"))
 			return update
-		}, map[MessageOrigin]int{OriginProposal: 2}},
+		}, map[MessageOrigin]int{}},
+		// The commit advance carries the next chunk to 2, so no follow-up.
 		{"ack that advances commit", func() Update {
 			return node.Step(Message{Type: MsgAppendResponse, From: 2, To: 1, Term: 1, LogIndex: 2})
-		}, map[MessageOrigin]int{OriginCommitAdvance: 2, OriginAckResend: 1}},
+		}, map[MessageOrigin]int{OriginCommitAdvance: 2}},
 		// D018: an ack that does not advance matchIndex sends nothing.
 		{"duplicate ack", func() Update {
 			return node.Step(Message{Type: MsgAppendResponse, From: 2, To: 1, Term: 1, LogIndex: 2})

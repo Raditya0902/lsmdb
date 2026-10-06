@@ -30,6 +30,11 @@ type Node struct {
 	nextIndex    map[uint64]uint64
 	matchIndex   map[uint64]uint64
 	recentActive map[uint64]bool
+	// outstanding is the last index of the entry-carrying append in flight to
+	// each peer, or 0; outstandingAge counts leader ticks since it was sent.
+	// While one is outstanding, appends to that peer carry no entries (D022).
+	outstanding    map[uint64]uint64
+	outstandingAge map[uint64]int
 
 	malformedAppendsDropped uint64
 	votesIgnoredInLease     uint64
@@ -99,9 +104,15 @@ func (n *Node) Tick() Update {
 	if n.role == Leader {
 		n.heartbeatElapsed++
 		n.quorumElapsed++
+		expired := n.expireOutstanding()
 		if n.heartbeatElapsed >= n.cfg.HeartbeatTicks {
 			n.heartbeatElapsed = 0
 			update.Messages = append(update.Messages, n.broadcastAppend(OriginHeartbeat)...)
+		} else {
+			// An expired append is re-sent now, not at the next heartbeat.
+			for _, peer := range expired {
+				update.Messages = append(update.Messages, n.appendMessage(peer, 0, OriginHeartbeat))
+			}
 		}
 		if n.quorumElapsed >= n.cfg.CheckQuorumTicks {
 			n.quorumElapsed = 0
@@ -384,6 +395,8 @@ func (n *Node) becomeLeader() Update {
 	n.nextIndex = make(map[uint64]uint64, len(n.peers()))
 	n.matchIndex = make(map[uint64]uint64, len(n.peers()))
 	n.recentActive = make(map[uint64]bool, len(n.peers()))
+	n.outstanding = make(map[uint64]uint64, len(n.peers()))
+	n.outstandingAge = make(map[uint64]int, len(n.peers()))
 	last := n.lastIndex()
 	for _, peer := range n.peers() {
 		n.nextIndex[peer] = last + 1
@@ -656,6 +669,7 @@ func (n *Node) handleSnapshotResponse(message Message) Update {
 	}
 	n.recentActive[message.From] = true
 	if message.Reject {
+		n.outstanding[message.From] = 0
 		return Update{Messages: []Message{n.appendMessage(message.From, 0, OriginOther)}}
 	}
 	matched := min(message.LogIndex, n.lastIndex())
@@ -663,6 +677,7 @@ func (n *Node) handleSnapshotResponse(message Message) Update {
 		n.matchIndex[message.From] = matched
 		n.nextIndex[message.From] = matched + 1
 	}
+	n.settleOutstanding(message.From)
 	update := n.maybeCommit()
 	if n.nextIndex[message.From] <= n.lastIndex() {
 		update.Messages = append(update.Messages, n.appendMessage(message.From, 0, OriginOther))
@@ -686,6 +701,8 @@ func (n *Node) handleAppendResponse(message Message) Update {
 		// below it is stale. Under capped appends, letting it lower nextIndex
 		// would re-ship an already-matched chunk forever (D019).
 		n.nextIndex[message.From] = max(1, next, n.matchIndex[message.From]+1)
+		// A rejection settles whatever was in flight: the probe goes now.
+		n.outstanding[message.From] = 0
 		return Update{Messages: []Message{n.appendMessage(message.From, message.Context, OriginAckResend)}}
 	}
 	advanced := false
@@ -695,11 +712,13 @@ func (n *Node) handleAppendResponse(message Message) Update {
 		n.matchIndex[message.From] = matched
 		n.nextIndex[message.From] = matched + 1
 	}
+	n.settleOutstanding(message.From)
 	update := n.maybeCommit()
 	// A duplicate or stale ack proves nothing new, and answering it sustained
-	// endless append/ack chains (D018). Heartbeats re-ship whatever a lost
-	// message left behind, because nextIndex only moves on responses.
-	if advanced && n.nextIndex[message.From] <= n.lastIndex() {
+	// endless append/ack chains (D018). A lost message is re-sent once its
+	// append has been outstanding for the resend timeout (D022). The follow-up
+	// is skipped when the commit advance above already carried entries.
+	if advanced && n.outstanding[message.From] == 0 && n.nextIndex[message.From] <= n.lastIndex() {
 		update.Messages = append(update.Messages, n.appendMessage(message.From, message.Context, OriginAckResend))
 	}
 	return update
@@ -740,13 +759,23 @@ func (n *Node) broadcastAppend(origin MessageOrigin) []Message {
 	peers := n.replicationPeers()
 	messages := make([]Message, 0, len(peers)-1)
 	for _, peer := range peers {
-		if peer != n.cfg.ID {
-			messages = append(messages, n.appendMessage(peer, 0, origin))
+		if peer == n.cfg.ID {
+			continue
 		}
+		// A new proposal waits for the ack of the append in flight; its
+		// follow-up carries every entry proposed meanwhile (D022).
+		if origin == OriginProposal && n.outstanding[peer] != 0 {
+			continue
+		}
+		messages = append(messages, n.appendMessage(peer, 0, origin))
 	}
 	return messages
 }
 
+// appendMessage builds the next append to peer. While an entry-carrying append
+// to peer is outstanding it carries no entries, only the commit index and any
+// read context (D022); otherwise it carries the capped chunk from nextIndex and
+// becomes the outstanding append.
 func (n *Node) appendMessage(peer, context uint64, origin MessageOrigin) Message {
 	next := n.nextIndex[peer]
 	if next == 0 {
@@ -756,12 +785,49 @@ func (n *Node) appendMessage(peer, context uint64, origin MessageOrigin) Message
 		snapshot := cloneSnapshot(n.snapshot)
 		return Message{Type: MsgSnapshot, From: n.cfg.ID, To: peer, Term: n.term, Snapshot: &snapshot, Origin: origin}
 	}
-	return Message{
+	message := Message{
 		Type: MsgAppend, From: n.cfg.ID, To: peer, Term: n.term,
 		LogIndex: next - 1, LogTerm: n.termAt(next - 1),
-		Entries: n.cappedEntries(next), LeaderCommit: n.commit,
-		Context: context, Origin: origin,
+		LeaderCommit: n.commit, Context: context, Origin: origin,
 	}
+	if n.outstanding[peer] != 0 {
+		return message
+	}
+	message.Entries = n.cappedEntries(next)
+	if len(message.Entries) > 0 {
+		n.outstanding[peer] = message.Entries[len(message.Entries)-1].Index
+		n.outstandingAge[peer] = 0
+	}
+	return message
+}
+
+// settleOutstanding ends peer's outstanding append once peer has matched
+// everything it carried.
+func (n *Node) settleOutstanding(peer uint64) {
+	if n.outstanding[peer] != 0 && n.matchIndex[peer] >= n.outstanding[peer] {
+		n.outstanding[peer] = 0
+	}
+}
+
+// expireOutstanding ages every outstanding append by one tick and ends those
+// that reached the resend timeout, returning their peers in ascending order.
+func (n *Node) expireOutstanding() []uint64 {
+	limit := n.cfg.inflightResendTicks
+	if limit == 0 {
+		limit = defaultInflightResendTicks
+	}
+	var expired []uint64
+	for _, peer := range n.replicationPeers() {
+		if n.outstanding[peer] == 0 {
+			continue
+		}
+		n.outstandingAge[peer]++
+		if n.outstandingAge[peer] >= limit {
+			n.outstanding[peer] = 0
+			expired = append(expired, peer)
+		}
+	}
+	return expired
 }
 
 // cappedEntries returns the entries from index from whose accounted size fits

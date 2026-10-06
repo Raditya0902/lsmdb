@@ -96,11 +96,11 @@ func TestEntryLargerThanCapShipsAlone(t *testing.T) {
 	nodes := newCappedCluster(t, 1024, 1)
 	leader := electNodeOne(t, nodes)
 	proposeWhileCutOff(t, nodes, leader, 4096, 100)
-	heartbeat := appendsTo(leader.Tick(), 2)
-	if len(heartbeat) != 1 || len(heartbeat[0].Entries) != 1 || len(heartbeat[0].Entries[0].Data) != 4096 {
-		t.Fatalf("heartbeat to 2 = %d messages, entries %v; want the 4096-byte entry alone", len(heartbeat), entrySizes(heartbeat))
+	resend := resendTo(t, leader, 2)
+	if len(resend) != 1 || len(resend[0].Entries) != 1 || len(resend[0].Entries[0].Data) != 4096 {
+		t.Fatalf("resend to 2 = %d messages, entries %v; want the 4096-byte entry alone", len(resend), entrySizes(resend))
 	}
-	response := nodes[2].Step(heartbeat[0]).Messages
+	response := nodes[2].Step(resend[0]).Messages
 	if len(response) != 1 || response[0].Reject {
 		t.Fatalf("follower response = %+v", response)
 	}
@@ -153,6 +153,8 @@ func TestCappedAppendDoesNotCommitStaleSuffix(t *testing.T) {
 func TestFarBehindFollowerCatchesUpThroughCappedChunks(t *testing.T) {
 	// 20 entries of 200 bytes: 4 fit a 1024-byte cap (4 x 232), so C = 5 chunks.
 	// Follower 2 acked the no-op, so nextIndex = matchIndex + 1 and R = 0.
+	// D022 replaces D019's HeartbeatTicks with the resend timeout: the bound is
+	// (R + C + k) x testResendTicks, whatever HeartbeatTicks is.
 	const capBytes, heartbeatTicks, entries, chunks = 1024, 2, 20, 5
 	nodes := newCappedCluster(t, capBytes, heartbeatTicks)
 	leader := electNodeOne(t, nodes)
@@ -160,14 +162,14 @@ func TestFarBehindFollowerCatchesUpThroughCappedChunks(t *testing.T) {
 		t.Fatalf("matchIndex[2] = %d before the cut, want 1", match)
 	}
 	proposeWhileCutOff(t, nodes, leader, repeatSize(200, entries)...)
-	// Only heartbeats deliver: every follow-up is lost, and so are the acks
-	// to heartbeat rounds 1, 3 and 4.
+	// Only timeout resends deliver: every follow-up is lost, and so are the
+	// acks to resend rounds 1, 3 and 4.
 	lostAcks := map[int]bool{1: true, 3: true, 4: true}
 	k := len(lostAcks)
 	round, caughtUpAt := 0, 0
-	for tick := 1; tick <= 4*(chunks+k)*heartbeatTicks && caughtUpAt == 0; tick++ {
+	for tick := 1; tick <= 4*(chunks+k)*testResendTicks && caughtUpAt == 0; tick++ {
 		messages := leader.Tick().Messages
-		if len(appendsTo(Update{Messages: messages}, 2)) > 0 {
+		if len(entryAppendsTo(Update{Messages: messages}, 2)) > 0 {
 			round++
 		}
 		current := round
@@ -176,7 +178,7 @@ func TestFarBehindFollowerCatchesUpThroughCappedChunks(t *testing.T) {
 				if len(message.Entries) > 1 && accountedBytes(message.Entries) > capBytes {
 					t.Errorf("append to 2 carries %d accounted bytes, cap %d", accountedBytes(message.Entries), capBytes)
 				}
-				return message.Origin == OriginAckResend
+				return len(message.Entries) > 0 && message.Origin != OriginHeartbeat
 			}
 			return message.Type == MsgAppendResponse && message.From == 2 && lostAcks[current]
 		})
@@ -187,20 +189,20 @@ func TestFarBehindFollowerCatchesUpThroughCappedChunks(t *testing.T) {
 			caughtUpAt = tick
 		}
 	}
-	bound := (0 + chunks + k) * heartbeatTicks
+	bound := (0 + chunks + k) * testResendTicks
 	if caughtUpAt == 0 || caughtUpAt > bound {
-		t.Fatalf("caught up at tick %d (0 = never), want <= (R + C + k) x HeartbeatTicks = %d", caughtUpAt, bound)
+		t.Fatalf("caught up at tick %d (0 = never), want <= (R + C + k) x %d = %d", caughtUpAt, testResendTicks, bound)
 	}
-	t.Logf("caught up at tick %d after %d heartbeat rounds; bound %d", caughtUpAt, round, bound)
+	t.Logf("caught up at tick %d after %d resend rounds; bound %d", caughtUpAt, round, bound)
 }
 
 func TestStaleRejectionDoesNotStrandCappedFollower(t *testing.T) {
 	nodes := newCappedCluster(t, 1024, 1)
 	leader := electNodeOne(t, nodes)
 	proposeWhileCutOff(t, nodes, leader, repeatSize(200, 20)...)
-	// Two heartbeat rounds with follow-ups lost deliver two 4-entry chunks.
+	// Two resend rounds with follow-ups lost deliver two 4-entry chunks.
 	dropFollowUps := func(message Message) bool { return message.Origin == OriginAckResend && message.To == 2 }
-	for i := 0; i < 2; i++ {
+	for tick := 0; tick < 2*testResendTicks && leader.Status().MatchIndex[2] < 9; tick++ {
 		route(t, nodes, leader.Tick().Messages, dropFollowUps)
 	}
 	if match := leader.Status().MatchIndex[2]; match != 9 {
@@ -231,9 +233,9 @@ func TestDefaultAppendCapIsOneMiB(t *testing.T) {
 	leader := electNodeOne(t, nodes)
 	const accounted = 128 << 10 // 8 entries fill 1 MiB exactly
 	proposeWhileCutOff(t, nodes, leader, repeatSize(accounted-testEntryOverhead, 10)...)
-	heartbeat := appendsTo(leader.Tick(), 2)
-	if len(heartbeat) != 1 || len(heartbeat[0].Entries) != 8 {
-		t.Fatalf("heartbeat to 2 carries %v entries, want 8 (1 MiB accounted)", entrySizes(heartbeat))
+	resend := resendTo(t, leader, 2)
+	if len(resend) != 1 || len(resend[0].Entries) != 8 {
+		t.Fatalf("resend to 2 carries %v entries, want 8 (1 MiB accounted)", entrySizes(resend))
 	}
 }
 
@@ -243,8 +245,8 @@ func TestSmallPendingEntriesShipInOneAppend(t *testing.T) {
 	nodes := newTestCluster(t)
 	leader := electNodeOne(t, nodes)
 	proposeWhileCutOff(t, nodes, leader, repeatSize(128, 20)...)
-	heartbeat := appendsTo(leader.Tick(), 2)
-	if len(heartbeat) != 1 || len(heartbeat[0].Entries) != 20 {
-		t.Fatalf("heartbeat to 2 = %d messages carrying %v entries, want one append with all 20", len(heartbeat), entrySizes(heartbeat))
+	resend := resendTo(t, leader, 2)
+	if len(resend) != 1 || len(resend[0].Entries) != 20 {
+		t.Fatalf("resend to 2 = %d messages carrying %v entries, want one append with all 20", len(resend), entrySizes(resend))
 	}
 }

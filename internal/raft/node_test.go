@@ -371,6 +371,11 @@ func TestJointConsensusRequiresOldAndNewMajorities(t *testing.T) {
 	if leader.Status().CommitIndex != 3 {
 		t.Fatalf("final configuration did not commit: %+v", leader.Status())
 	}
+	// Node 3 never received the joint entry; the leader re-sends it once that
+	// append has been outstanding for the resend timeout (D022).
+	for tick := 0; tick < testResendTicks; tick++ {
+		deliverAll(t, nodes, leader.Tick().Messages)
+	}
 	for id, node := range nodes {
 		if !equalVoters(node.Status().Membership.Voters, []uint64{1, 2, 3, 4}) {
 			t.Fatalf("node %d membership = %+v", id, node.Status().Membership)

@@ -167,6 +167,8 @@ type Config struct {
 	AppliedIndex uint64
 	// maxAppendBytes overrides the per-message entry cap; tests only (D019).
 	maxAppendBytes uint64
+	// inflightResendTicks overrides the resend timeout; tests only (D022).
+	inflightResendTicks int
 }
 
 func (c Config) validate() error {
@@ -246,6 +248,11 @@ const (
 	MessageEnvelopeBytes = 121
 	// defaultMaxAppendBytes caps the accounted entry bytes in one append.
 	defaultMaxAppendBytes = 1 << 20
+	// defaultInflightResendTicks is how many leader ticks an entry-carrying
+	// append stays outstanding without a response before it is sent again
+	// (D022). With 20 ms ticks and the runtime's 500 ms send deadline, at most
+	// five copies of a chunk are in flight to one follower.
+	defaultInflightResendTicks = 5
 )
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {

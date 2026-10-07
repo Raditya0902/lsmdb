@@ -14,9 +14,13 @@ are smoke tests and must not be quoted as results.
 | `cmd/bench` | Embedded LSM vs SQLite workloads | `<date>-<sha12>-embedded.json` |
 | `scripts/vm_smoke_check.go` | Checks a `clusterbench` or `bench_compare` file before its numbers are used (section 5) | PASS/FAIL per check, a table of runs, exit 1 on any FAIL |
 | `scripts/sweep_table.go` | Reads result files with different `-duration` values (section 3d) | One row per run: duration, ops/s, appends per entry, ack_resend share |
+| `scripts/verify_readme.py` | Rebuilds every figure in the README's Results section from the committed compare JSON and large-value files, and checks that each appears in the README. Run from the repo root: `python3 scripts/verify_readme.py` | One line per figure and fact, ok or MISSING; exit 1 if any is missing |
+| `scripts/check_paths.py` | Checks that every path, link, anchor and `go run` target the README cites exists. Run from the repo root: `python3 scripts/check_paths.py` | One line per path, ok or MISSING; exit 1 if any is missing |
 
-`vm_smoke_check.go` and `sweep_table.go` only read result files. The three tools
-that write them have these properties:
+`vm_smoke_check.go` and `sweep_table.go` only read result files. `verify_readme.py`
+and `check_paths.py` only read the README, the result files and the repository
+tree. They need Python 3.6 or later and its standard library only. The three
+tools that write result files have these properties:
 - They never overwrite a file. A name collision gets `-2`, `-3`, and so on.
 - Secondary runs write to the OS temp dir. Official runs write to `benchmarks/results/`.
 - None of them writes `results.json` unless that path is passed with `-out` and does
@@ -38,13 +42,13 @@ sudo apt-get update && sudo apt-get install -y git build-essential   # cgo for g
 go version
 ```
 
-The VM needs the branch and every comparison commit. Carry them as a bundle of
-the branch's full history, which needs no access to the remote. On the
-development machine:
+The VM needs `main`, which contains every comparison commit. Carry it as a bundle
+of `main`'s full history, which needs no access to the remote. On the development
+machine:
 
 ```bash
-B=~/lsmdb-transfer/lsmdb-phase10-$(git rev-parse --short HEAD).bundle
-mkdir -p ~/lsmdb-transfer && git bundle create "$B" phase-10-benchmark-harness-v2
+B=~/lsmdb-transfer/lsmdb-main-$(git rev-parse --short main).bundle
+mkdir -p ~/lsmdb-transfer && git bundle create "$B" main
 git bundle verify "$B"   # must say "The bundle records a complete history"
 shasum -a 256 "$B"       # note the hash
 scp "$B" <vm>:
@@ -54,18 +58,22 @@ On the VM, check the hash before using the bundle. `git bundle verify` needs a
 repository, so it runs inside the clone.
 
 ```bash
-B=~/lsmdb-phase10-<sha>.bundle
+B=~/lsmdb-main-<sha>.bundle
 sha256sum "$B"           # must equal the hash from the development machine
 git bundle list-heads "$B"
-git clone -b phase-10-benchmark-harness-v2 "$B" lsmdb && cd lsmdb
+git clone -b main "$B" lsmdb && cd lsmdb
 git bundle verify "$B"
 git config user.name "bench" && git config user.email "bench@localhost"  # cherry-pick needs an identity
 git log --oneline -1     # must be the tip that list-heads printed
 go test ./...
 ```
 
-Once the branch is pushed, a clone of the remote works instead:
-`git clone https://github.com/Raditya0902/lsmdb.git lsmdb && cd lsmdb && git checkout phase-10-benchmark-harness-v2`.
+A clone of the remote works instead:
+`git clone https://github.com/Raditya0902/lsmdb.git lsmdb && cd lsmdb`.
+
+The phase-10 branch was merged into `main` and deleted. Its tip is commit
+`8f07b48`, which section 3d checks out. A bundle of `main` carries that commit but
+not the `phase-10` tag that points at it, so 3d uses the SHA.
 
 Pick one directory on the target disk for all benchmark data. The commands below
 call it `$BENCH`.
@@ -227,10 +235,11 @@ so it never passes `-official` and its files are labeled `secondary`.
 
 It measures only the tip arm, at 1 client, with durations of 10, 20, 30 and 60 s
 and 5 repetitions each. `bench_compare` needs at least two arms, so the sweep runs
-`clusterbench` directly from this checkout. That binary runs the tip arm's engine:
-no engine file changed between `8eae967` and the branch head, which the first
-command confirms. `clusterbench` takes `-machine-type` and `-disk-type` itself, with
-the same `$MACHINE` and `$DISK` as the baseline.
+`clusterbench` directly from this checkout. That binary runs the tip arm's engine
+only at `8f07b48`, the phase-10 tip: no engine file changed between `8eae967` and
+that commit, which the first command confirms. On `main` the engine differs, so
+first run `git checkout --detach 8f07b48`. `clusterbench` takes `-machine-type` and
+`-disk-type` itself, with the same `$MACHINE` and `$DISK` as the baseline.
 
 ```bash
 git diff --quiet 8eae967 HEAD -- . ':!cmd' ':!scripts' ':!benchmarks' ':!internal/bench*' \
@@ -271,6 +280,98 @@ Raft log grows for the whole run, because the snapshot threshold of 1,000,000
 entries is never reached. On every accepted append, `handleAppend` copies the
 whole retained log and `rebuildMembership` decodes all of it. So throughput can fall
 with duration whether or not the storm exists.
+
+### 3e. Phase 12a, 12b and 13 comparisons
+
+These are the comparisons behind the README's Results, as written in the phase
+plans. All three ran on a GCE e2-standard-4 with a 100 GB pd-ssd boot disk:
+
+```bash
+export BENCH=/mnt/bench MACHINE="e2-standard-4" DISK="pd-ssd 100GB boot disk (network)"
+export PROJECT=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/project/project-id)
+```
+
+`PROJECT` is the cloud project ID, read from the VM's metadata server. Each check
+below passes it to `-forbid`, so a result file that contains it fails. The checker
+already looks for the hostname and username of the machine it runs on (section 5).
+
+**Phase 12a: the duplicate-ack fix (50 runs, about 35 minutes).** The plan wrote
+the arms as `<b>` and `<c>`; they were `bfa2a77` and `56267a1`, as the result
+file records. The committed file is
+`benchmarks/results/2026-10-05-p12a-dup-ack-compare.json`.
+
+```bash
+go run scripts/bench_compare.go run \
+  -arm base=bfa2a77 -arm fix=56267a1 \
+  -clients 1,2,4,8,16 -repetitions 5 -work "$BENCH/p12a" \
+  -out "benchmarks/results/$(date -u +%F)-p12a-compare.json" \
+  -machine-type "$MACHINE" -disk-type "$DISK" \
+  -- -official -warmup 5s -duration 30s -data-dir "$BENCH"
+go run scripts/vm_smoke_check.go -expect base=bfa2a77 -expect fix=56267a1 \
+  -forbid "$(hostname)" -forbid "$(id -un)" -forbid "$PROJECT" \
+  "benchmarks/results/$(date -u +%F)-p12a-compare.json"
+```
+
+**The p12a file name.** The command above writes
+`benchmarks/results/<date>-p12a-compare.json`, where `<date>` is the UTC date the
+run started. The committed result of the 2026-10-05 run is named
+`benchmarks/results/2026-10-05-p12a-dup-ack-compare.json` instead. To give a new
+run's output the same form, rename it after its check passes. Set `D` to the date
+in the output file's name, not to today's date:
+
+```bash
+D=YYYY-MM-DD   # replace with the date in the new output file's name
+mv -n "benchmarks/results/$D-p12a-compare.json" "benchmarks/results/$D-p12a-dup-ack-compare.json"
+ls -l "benchmarks/results/$D-p12a-dup-ack-compare.json"
+```
+
+This renames only the new, uncommitted output. `mv -n` refuses to replace a file
+that already exists, so the committed 2026-10-05 file cannot be overwritten. Never
+rename a committed result file.
+
+**Phase 12b: the append cap and the log copy (75 runs, about 47 minutes).** The
+committed file is `benchmarks/results/2026-10-05-p12b-compare.json`.
+
+```bash
+go run scripts/bench_compare.go run \
+  -arm base=6d6dda7 -arm cap=8c8a317 -arm copy=18369e8 \
+  -clients 1,2,4,8,16 -repetitions 5 -work "$BENCH/p12b" \
+  -out "$BENCH/p12b-compare.json" \
+  -machine-type "$MACHINE" -disk-type "$DISK" \
+  -- -official -warmup 5s -duration 30s -data-dir "$BENCH"
+go run scripts/vm_smoke_check.go -expect base=6d6dda7 -expect cap=8c8a317 -expect copy=18369e8 \
+  -forbid "$(hostname)" -forbid "$(id -un)" -forbid "$PROJECT" "$BENCH/p12b-compare.json"
+go run scripts/bench_compare.go summarize "$BENCH/p12b-compare.json"
+go run scripts/bench_compare.go summarize -ref cap "$BENCH/p12b-compare.json"
+```
+
+**Phase 13: group commit (60 runs, about 40 minutes).** The committed file is
+`benchmarks/results/2026-10-06-p13-compare.json`.
+
+```bash
+go run scripts/bench_compare.go run \
+  -arm storm=bfa2a77 -arm copy=18369e8 -arm prereq=53b5d70 -arm final=a76f182 \
+  -clients 1,4,16 -repetitions 5 -work "$BENCH/p13b" \
+  -out "$BENCH/p13-compare.json" \
+  -machine-type "$MACHINE" -disk-type "$DISK" \
+  -- -official -warmup 5s -duration 30s -snapshot-threshold 1000000 -data-dir "$BENCH"
+go run scripts/vm_smoke_check.go \
+  -expect storm=bfa2a77 -expect copy=18369e8 -expect prereq=53b5d70 -expect final=a76f182 \
+  -forbid "$PROJECT" "$BENCH/p13-compare.json"
+go run scripts/bench_compare.go summarize -ref copy "$BENCH/p13-compare.json"
+go run scripts/bench_compare.go summarize -ref prereq "$BENCH/p13-compare.json"
+```
+
+Notes on the phase-13 work directory:
+- **Why `p13b`:** attempt 1 used `-work "$BENCH/p13"`. It stopped at run 43 of 60
+  on the harness port race, which is still unfixed. Attempt 2, the official one,
+  changed only the work directory, to `p13b`, so that attempt 1's worktrees and
+  per-run reports stayed separate. On a fresh machine any empty directory works.
+- **Attempt 1's file:** it is committed as
+  `benchmarks/results/2026-10-06-p13-compare-attempt1.json`, labeled INCOMPLETE,
+  and is not analyzed.
+- **If the port race recurs:** "bind: address already in use" stops the run.
+  Rerun the whole comparison into a new work directory and output file.
 
 ## 4. Official embedded run
 

@@ -721,7 +721,7 @@ Results (measured 2026-10-06, `benchmarks/results/2026-10-06-p13-compare.json`):
     failed operations.
   - **Platform dependence:** the gain depends on what a log sync costs. The
     pd-ssd here is network storage. Its 4 KiB fsync p50, sampled before
-    and after each run, was 1.40–2.98 ms (median 1.73) across all 120
+    and after each run, was 1.40–2.98 ms (median 1.72) across all 120
     samples. A disk with a cheaper or a more expensive fsync, another
     platform, or a multi-machine cluster would give different numbers.
     These numbers are not comparable to the Mac or to other platforms.

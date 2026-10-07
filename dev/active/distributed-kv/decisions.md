@@ -753,3 +753,48 @@ Results (measured 2026-10-06, `benchmarks/results/2026-10-06-p13-compare.json`):
 
 Add a new numbered entry explaining the reason and consequences instead of
 rewriting an accepted decision without history.
+
+### C001 — D020 is not built (2026-10-06)
+
+Reason:
+
+- D020 was accepted on 2026-10-05, conditional on a gate, and its
+  implementation was never started. The tracker keeps it open as phase 12b
+  hardening item 3, optional and last (`tasks.md:447`).
+- On `main` at `d1b1a46`, the store still opens a headerless `raft.log`
+  (`internal/raftstore/store.go:22, 56`). There is no `raft-log.v1`, no guard
+  directory and no migration.
+
+Consequences:
+
+- D019 raised the entry limit to 4 MiB + 32 KiB. Recovery still treats a record
+  longer than the binary's limit as a torn tail and truncates the log there
+  (`store.go:65, 276`). A binary from before D019 that opens a log holding a
+  larger entry discards it and every later entry, committed or not.
+  Downgrades therefore stay destructive, as D019's consequences describe, until
+  D020 is built.
+- DESIGN.md lists this under Known limitations. D020's text is unchanged and
+  still describes the intended design.
+
+### C002 — D022 as built: the follower merge rule and the A3 CI skip (2026-10-06)
+
+Reason and consequences:
+
+- **Merge rule.** Decision item 4 merges queued appends "from the same leader
+  and term". The code groups queued appends by sender only
+  (`internal/raftnode/runtime.go:518`).
+  - A term change still ends the merge. An append at a higher term makes the
+    follower adopt that term, which changes hard state, and an update with hard
+    state is persisted alone (`runtime.go:567`).
+  - An append at a lower term gets a stale-term rejection and changes no state,
+    so it joins the merge and its reply is sent after the shared persist.
+  - The effect matches the decision; this entry records how it is built.
+- **A3 skip.** "As built in `53b5d70`" says the `LSMDB_RACE_STRESS` skip and its
+  `raceEnabled` constant were removed.
+  - On GitHub-hosted runners, A3 then failed 2 of 4 CI runs at the final arm's
+    code, with 2–3 elections and 0 failed writes.
+  - `d6e08d8` restored a skip for CI only: A3 is skipped when `CI=true` unless
+    `LSMDB_RACE_STRESS=1` (`cluster/large_value_test.go:150-153`). It runs
+    everywhere else, including under `-race`. `raceEnabled` stays removed.
+  - The tracker item "A3 on GitHub runners" (After Phase 13) holds the open
+    investigation.

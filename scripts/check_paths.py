@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
-"""Check that every repository path, link and anchor README.md cites exists.
+"""Check that every repository path, link and anchor a Markdown file cites exists.
 
-What it checks:
-  - Relative Markdown links, such as [text](path#anchor). The path must exist.
-    An anchor must match a heading slug in the target file, using GitHub's
-    rule: lowercase, punctuation dropped, spaces turned into hyphens.
+What it checks, for each file given with --file (README.md by default):
+  - Relative Markdown links, such as [text](path#anchor). The path is resolved
+    from the directory of the file being checked and must exist. An anchor
+    must match a heading slug in the target file, using GitHub's rule:
+    lowercase, punctuation dropped, spaces turned into hyphens. A bare
+    [text](#anchor) refers to the file being checked.
   - Backticked tokens outside code blocks that look like paths: they contain a
-    "/" or end in a known extension.
+    "/" or end in a known extension. These name repository paths, so they are
+    resolved from the repository root.
     - A glob, such as db/replica_*, must match at least one file.
     - A bare file name must exist somewhere in the repository.
-    - File extensions and HTTP endpoints are listed in NOT_PATHS and skipped.
+    - Absolute paths and HTTP endpoints, such as /mnt/bench or /metrics, are not
+      repository paths and are skipped, as are the file extensions in
+      NOT_PATHS.
   - Paths under scripts/, cmd/, benchmarks/, api/ and deploy/ inside code
-    blocks.
-  - The target of every "go run" command, in prose or in code blocks.
+    blocks, from the repository root.
+  - The target of every "go run" command, in prose or in code blocks, from the
+    repository root.
 
-Inputs: README.md and the repository tree, relative to the repository root.
+Inputs: the Markdown files and the repository tree.
 
 Run from the repository root. It needs Python 3.6 or later and the standard
 library only:
   python3 scripts/check_paths.py
+  python3 scripts/check_paths.py --file DESIGN.md --file benchmarks/RUNBOOK.md
 
 It prints one line per path, ok, skip or MISSING. It exits 1 if anything is
-missing. It only reads files.
+missing in any file. It only reads files.
 """
+import argparse
 import glob
 import os
 import re
@@ -32,8 +40,6 @@ from typing import List, Set, Tuple
 NOT_PATHS = {
     ".pb.go": "file extension",
     ".proto": "file extension",
-    "/healthz": "HTTP endpoint",
-    "/metrics": "HTTP endpoint",
 }
 PATH_EXTENSIONS = r"\.(go|md|json|sh|proto|yml|yaml|txt)$"
 
@@ -79,18 +85,18 @@ def find_file(name: str) -> List[str]:
     return matches
 
 
-def check_links(prose: str) -> None:
+def check_links(prose: str, source: str) -> None:
     print("== Markdown links")
     for link in sorted(set(re.findall(r"\]\(([^)\s]+)\)", prose))):
         if link.startswith(("http://", "https://", "mailto:")):
             continue
         path, _, anchor = link.partition("#")
-        target = path or "README.md"
+        target = os.path.normpath(os.path.join(os.path.dirname(source), path)) if path else source
         ok = os.path.exists(target)
         if ok and anchor:
             with open(target) as f:
                 ok = anchor in slugs(f.read())
-        report(ok, link)
+        report(ok, link, "" if target == link else f"resolves to {target}")
 
 
 def check_backticks(prose: str) -> None:
@@ -99,7 +105,9 @@ def check_backticks(prose: str) -> None:
         looks_like_path = "/" in token or re.search(PATH_EXTENSIONS, token)
         if not looks_like_path or token.startswith(("http", "-", "$")) or "<" in token:
             continue
-        if token in NOT_PATHS:
+        if token.startswith("/"):
+            print(f"skip    {token}  (absolute path or endpoint, not a repository path)")
+        elif token in NOT_PATHS:
             print(f"skip    {token}  ({NOT_PATHS[token]})")
         elif "*" in token:
             matches = glob.glob(token)
@@ -118,25 +126,39 @@ def check_code_blocks(blocks: List[str]) -> None:
             report(os.path.exists(token[2:] if token.startswith("./") else token.rstrip("/.")), token)
 
 
-def check_go_run(readme: str) -> None:
+def check_go_run(markdown: str) -> None:
     print("== go run targets")
-    flat = " ".join(readme.split())  # a command in prose may wrap across lines
+    flat = " ".join(markdown.split())  # a command in prose may wrap across lines
     for target in sorted(set(re.findall(r"go run (\S+)", flat))):
-        target = target.strip("`")
+        target = target.split("`")[0].rstrip(".,;:)")  # end at the code span, drop sentence punctuation
         path = target[2:] if target.startswith("./") else target
         if path.endswith("/..."):
             path = path[:-4]
         report(os.path.exists(path), f"go run {target}")
 
 
-def main() -> None:
-    with open("README.md") as f:
-        readme = f.read()
-    blocks, prose = code_blocks(readme)
-    check_links(prose)
+def check_file(source: str) -> None:
+    print(f"#### {source}")
+    with open(source) as f:
+        markdown = f.read()
+    blocks, prose = code_blocks(markdown)
+    check_links(prose, source)
     check_backticks(prose)
     check_code_blocks(blocks)
-    check_go_run(readme)
+    check_go_run(markdown)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Check the paths, links and anchors a Markdown file cites.")
+    parser.add_argument("--file", action="append", dest="files", metavar="PATH",
+                        help="Markdown file to check, relative to the repository root; repeatable "
+                             "(default: README.md)")
+    files = parser.parse_args().files or ["README.md"]
+    for source in files:
+        if not os.path.isfile(source):
+            report(False, source, "file to check not found")
+            continue
+        check_file(source)
     print(f"MISSING: {len(missing)}")
     sys.exit(1 if missing else 0)
 

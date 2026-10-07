@@ -15,7 +15,7 @@ are smoke tests and must not be quoted as results.
 | `scripts/vm_smoke_check.go` | Checks a `clusterbench` or `bench_compare` file before its numbers are used (section 5) | PASS/FAIL per check, a table of runs, exit 1 on any FAIL |
 | `scripts/sweep_table.go` | Reads result files with different `-duration` values (section 3d) | One row per run: duration, ops/s, appends per entry, ack_resend share |
 | `scripts/verify_readme.py` | Rebuilds every figure in the README's Results section from the committed compare JSON and large-value files, and checks that each appears in the README. Run from the repo root: `python3 scripts/verify_readme.py` | One line per figure and fact, ok or MISSING; exit 1 if any is missing |
-| `scripts/check_paths.py` | Checks that every path, link, anchor and `go run` target the README cites exists. Run from the repo root: `python3 scripts/check_paths.py` | One line per path, ok or MISSING; exit 1 if any is missing |
+| `scripts/check_paths.py` | Checks that every path, link, anchor and `go run` target a Markdown file cites exists: README.md by default, others with `--file` (repeatable). Run from the repo root: `python3 scripts/check_paths.py --file DESIGN.md` | One line per path, ok, skip or MISSING; exit 1 if any is missing |
 
 `vm_smoke_check.go` and `sweep_table.go` only read result files. `verify_readme.py`
 and `check_paths.py` only read the README, the result files and the repository

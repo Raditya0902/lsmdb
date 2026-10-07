@@ -36,16 +36,17 @@ Every `Set` and `Delete` follows this sequence under `db.mu`:
 
 ```
 1. AllocSeq()        — atomically reserve the next sequence number
-2. WAL.Append()      — write the record to disk (type | seq | keyLen | valLen | key | value | crc32)
+2. WAL.Append()      — one write of the record (type | seq | keyLen | valLen | key | value | crc32); no fsync
 3. MemTable.SetRaw() — insert the record into the in-memory map
 4. maybeFlush()      — if MemTable.Size() >= FlushThreshold, flush to SSTable
 5. maybeCompact()    — if len(readers) >= CompactionThreshold, compact all SSTables
 ```
 
-The WAL write happens before the MemTable update. If the process crashes after step 2
-but before step 3, the WAL record survives and is replayed on the next `Open`. If it
-crashes during step 2 (partial write), `ReadAll` detects the truncated record via CRC
-and drops it.
+The WAL write happens before the MemTable update. `Append` hands the record to the
+operating system in one `write` call and does not fsync; only `Close` syncs the WAL. A
+record therefore survives a process crash after step 2, and is replayed on the next
+`Open`, but not necessarily a power failure. If the process crashes during step 2
+(partial write), `ReadAll` detects the truncated record via CRC and drops it.
 
 **Sequence numbers** are monotonically increasing across the lifetime of the database,
 including restarts. Within a process, `NewWithSeq(old.NextSeq())` makes the post-flush
@@ -166,8 +167,8 @@ cycles through all residues for any `m` — preventing clustering in the bit arr
 
 **False negative impossibility.** Every `Add(key)` sets `k` bits. `MayContain(key)`
 checks the same `k` bits using the same deterministic hash. A key that was added always
-has all `k` bits set, so `MayContain` always returns true. The benchmark confirms this:
-1,000 inserted keys in `TestBloomNoFalseNegatives`, zero false negatives.
+has all `k` bits set, so `MayContain` always returns true. `TestBloomNoFalseNegatives`
+checks this for 1,000 inserted keys.
 
 ---
 
@@ -294,11 +295,14 @@ For a single `Set`:
 | WAL append | 1 sequential write (header + key + value + CRC) |
 | MemTable insert | 0 disk writes |
 | SSTable flush (every `FlushThreshold` writes) | 1 full scan of MemTable + 1 sequential write of SSTable |
-| Compaction (every `CompactionThreshold` flushes) | Read all current SSTables + write new SSTable |
+| Compaction (after `CompactionThreshold` flushes, then every `CompactionThreshold - 1`) | Read all current SSTables + write new SSTable |
 
-In the worst case, a single key participates in every compaction until it is eventually
-at the bottom level. Under size-tiered single-level compaction, each key is rewritten
-O(1/CompactionThreshold) times on average across its lifetime.
+Every compaction merges the full SSTable set, so it loads and rewrites every live
+record, not just the newest flushes. A compaction runs every `CompactionThreshold - 1`
+flushes, and a key written early is rewritten by each one for the rest of the
+database's life. For a workload of N distinct keys, total compaction work is about
+N² / (2 · FlushThreshold · (CompactionThreshold - 1)) records, so write amplification
+grows linearly with the live data size.
 
 ### Read amplification
 
@@ -310,8 +314,9 @@ Worst case for a miss:
 
 With `CompactionThreshold=4`, at most 3 SSTables accumulate before the next
 compaction, bounding worst-case read amplification to 4 (MemTable + 3 SSTables).
-The Bloom filter reduces the effective number of disk-touching SSTable probes
-to near zero for true negatives (99% skip rate observed in benchmarks).
+The Bloom filter skips an SSTable without reading its data when the key is absent
+and the filter answers false. Filters are sized for a 1% false-positive rate, so by
+design about 99 of 100 absent-key probes skip; no benchmark records the actual rate.
 
 ### Space amplification
 
@@ -363,7 +368,9 @@ The consensus module is deterministic and performs no networking or file I/O. A
 single runtime event loop feeds it ticks and messages, persists emitted hard-state
 and log effects, sends resulting messages, and applies committed entries in order.
 The production adapters are gRPC and a disk-backed stable store; tests also use a
-faultable in-memory transport.
+faultable in-memory transport. The runtime persists each update before it sends that
+update's messages or applies its committed entries, so a leader syncs a new entry to
+its own log before replicating it.
 
 ### Snapshots and Raft log compaction
 
@@ -396,13 +403,104 @@ per peer may be in flight.
 ### Election and partition behavior
 
 - Randomized election timeouts begin with pre-vote, which does not increment term.
+  A node grants a pre-vote only if it has not heard a leader within its own
+  randomized timeout and the candidate's log is at least as up to date. A pre-vote
+  request never changes the receiver's term, vote, leader or election timer.
+- A granted pre-vote echoes the proposed term; a rejection carries the responder's
+  current term. A pre-candidate that receives a rejection with a higher term becomes a
+  follower at that term, so two nodes whose terms and logs disagree cannot reject each
+  other forever.
 - A candidate persists its new term and self-vote before requesting votes.
+- A vote request is subject to a separate lease, never longer than the pre-vote
+  check's window (see Vote lease). Outside it, a vote request with a higher term
+  makes the receiver adopt that term; inside it, the request is ignored.
 - A leader appends a no-op in its term and commits only current-term entries by a
   majority `matchIndex`; earlier entries become committed with that prefix.
 - Followers reject mismatched prefixes with a conflict hint. Leaders move
-  `nextIndex` backward and replace only uncommitted conflicting suffixes.
-- Successful append responses track recent quorum activity. A leader that cannot
-  confirm a majority within the configured interval steps down.
+  `nextIndex` backward, but never below `matchIndex + 1`: within a term everything up
+  to `matchIndex` already matches, so a rejection below it is stale. Followers
+  truncate only uncommitted conflicting suffixes, and reject an append that conflicts
+  at or below their commit index.
+- A follower commits at most `min(LeaderCommit, lastNew)`, where `lastNew` is the
+  last index the append proved. A capped append often carries a `LeaderCommit` beyond
+  its last entry, and the follower's entries past `lastNew` may be a stale suffix.
+- Every append or snapshot response at the leader's term marks its sender as recently
+  active, rejections included. Every `CheckQuorumTicks` ticks the leader checks that
+  the recently active voters, with itself if it is a voter, form a quorum, and steps
+  down otherwise. A leader that loses its majority therefore steps down within
+  `2 × CheckQuorumTicks` ticks of its last contact.
+
+### Vote lease
+
+A node is in its vote lease while it is leader, or while it knows a leader and fewer
+than `ElectionTickMin` ticks have passed since its election timer was last reset,
+which every append or snapshot from that leader does. An append dropped as
+malformed does not reset the timer, so it does not extend the lease. A vote request
+with a higher term that reaches a node in lease is ignored before the term is
+adopted: the term, vote, leader, election timer and log stay unchanged, and nothing is
+persisted or sent. A reply would carry the voter's lower term, and the candidate's
+stale-term answer would end the lease anyway.
+
+The lease uses the minimum election timeout, not the node's randomized draw: the
+randomized timeout only spreads campaigns, and the minimum is the only length every
+node guarantees. Pre-vote keeps its own check, described above. Same-term vote
+requests are handled normally. `raft.Status.VotesIgnoredInLease` counts ignored
+requests; neither the gRPC `Status` RPC nor Prometheus exposes it.
+
+### Replication flow control
+
+An append carries entries from the follower's `nextIndex` while their accounted size
+stays within 1 MiB, and always at least one entry; each entry counts as its data plus
+32 bytes of framing. `raft.MaxEntryBytes`, 4 MiB + 32 KiB, is the single entry-size
+limit: `Propose` and `ProposeBatch` reject larger data with `ErrEntryTooLarge`, the
+stable store refuses to write it, and a follower treats an append carrying it as
+malformed. The largest entry therefore still fits one message under the gRPC limit.
+
+At most one append carrying entries is in flight per follower. It stays in flight
+until an ack brings that follower's `matchIndex` to its last index, a rejection
+arrives, or 5 ticks pass; an expired append is re-sent on the tick it expires. While
+one is in flight, heartbeats, commit advances and read probes to that follower carry
+no entries, only `LeaderCommit` and any read context, and new proposals send it
+nothing. Entries proposed meanwhile travel together in the next append.
+
+A success ack triggers a follow-up append only when it strictly advances the
+follower's `matchIndex` and nothing is left in flight. A duplicate or stale ack proves
+nothing new and sends nothing, and because every follow-up needs a strict increase in
+`matchIndex`, append/ack chains always end. A rejection ends the in-flight append and
+sends the probe at once.
+
+On the follower, an accepted append keeps the old log length, and a copy of the tail
+only when a conflict truncates it. Membership is rebuilt only when the append
+truncated the log or carried a configuration entry; if the rebuild fails, the log is
+restored and the append rejected.
+
+`Step` checks each append before anything else. Entry `i` must have index
+`LogIndex + i + 1`, a nonzero term that never decreases from `LogTerm` and never
+exceeds the message term, and at most `MaxEntryBytes` of data. An append that fails
+is dropped before any state changes, not even the term or the election timer, and
+gets no reply, so a leader that sends only such messages is replaced. The drop is
+logged, counted in `raft.Status.MalformedAppendsDropped` and exported as the
+`lsmdb_raft_malformed_appends_dropped_total` metric.
+
+### Batching and coalescing
+
+The runtime's event loop handles one event at a time. When it takes a proposal, it
+drains queued events without blocking and batches the proposals among them, up to 256
+proposals or 1 MiB accounted as in the append cap. The batch is appended by one
+`ProposeBatch` and persisted with one log sync. Other events drained meanwhile are
+handled afterwards, in arrival order. There is no linger: a proposal never waits for
+others to arrive. Each proposal completes at its own index once its entry commits and
+applies, and its result carries the entry's term as well as its index.
+
+A follower does the same with appends. Queued appends from the same sender, within the
+same caps, are stepped and persisted with one sync, and their responses are sent
+after it. An update that changes hard state, truncates the log, installs a snapshot or
+changes role ends the merge: the merged prefix is persisted first, then that update
+alone.
+
+Reads queued together share one probe, described below. The README's
+[Results](README.md#results) section reports what these mechanisms measured, and on
+which platform.
 
 ### Joint-consensus membership
 
@@ -425,33 +523,62 @@ membership state.
 ### Write and read guarantees
 
 A write response is sent only after its entry is persisted by a majority,
-committed, and applied to the leader's LSM state machine. Each command contains a
-client ID and monotonically increasing request sequence. Session metadata is
-applied in the same externally indexed batch as the user mutation, so an older
-retry becomes a no-op even after restart or failover.
+committed, and applied to the leader's LSM state machine. It carries the entry's log
+index and term. Each command contains a client ID and monotonically increasing
+request sequence. Session metadata is applied in the same externally indexed batch as
+the user mutation, so an older retry becomes a no-op even after restart or failover.
 
 A `Get` is served only by a leader that has committed an entry in its current
-term. It sends a contextual heartbeat, waits for a current-term quorum response,
-captures the commit index, waits until that index is applied locally, and then
-reads the LSM state. A partitioned leader therefore cannot serve a successful
-linearizable read.
+term. The leader sends every other voter a read probe: an append carrying a fresh
+context, built like any other append, so it carries no entries while an append to that
+voter is in flight. Reads drained from the queue together share one probe; a read that
+arrives after the probe was sent gets its own. Once a current-term quorum has answered
+the context and the leader has applied its commit index, each read on the probe
+completes with that index, and the handler reads the LSM state. A partitioned leader
+therefore cannot serve a successful linearizable read.
+
+A read can complete before proposals queued ahead of it. Each such proposal is still
+unacknowledged, so that write is concurrent with the read and may be ordered after it.
+This ordering is argued, not tested: no linearizability checker exists.
+
+Read completion on the probe path depends on the leader applying committed entries
+in the same update, before acks are counted. Moving apply off the event loop requires
+revisiting `acknowledgeRead` (`internal/raftnode/runtime.go:740-742`), which returns
+without completing a read while the applied index is behind the commit index, and the
+single-voter path (`runtime.go:395-396`), which completes at the commit index without
+checking it.
 
 ## Known limitations
 
 - **Single writer.** `db.mu` is a single mutex covering the entire write path. There
   is no lock-free or MVCC read path.
+- **The Raft log format is not versioned.** Recovery treats a record longer than the
+  binary's entry limit as a torn tail and truncates `raft.log` there, discarding every
+  later entry, committed or not. A binary with a lower limit, such as one from before
+  the 4 MiB + 32 KiB limit, must not open a log written by this one. Decision D020
+  describes a versioned log with a guard against older binaries; that guard is not
+  built.
 - **Flat SSTable list.** All SSTables are at one logical level. Leveled compaction
   (L0→L1→L2) would bound both read amplification and space amplification more tightly
   for large datasets.
 - **No fsync per WAL append.** `Close()` fsyncs the WAL file. Between the last flush
   and a power failure, recent writes can be lost.
-- **Pre-version-2 sequence damage is not repaired.** SSTables written before manifest
-  version 2 may already hold a newer value with a lower sequence number than an older
-  one. This cannot be detected after the fact.
+- **Databases written before manifest version 2 may contain out-of-order sequence
+  numbers.** Before version 2, a reopened database restarted its sequence counter at
+  1, so its SSTables may hold a newer value with a lower sequence number than an older
+  one. The upgrade cannot detect or repair such records after the fact.
 
   The legacy upgrade also cannot distinguish a WAL from a sequence-reuse write from a
   WAL resurrected by a lost post-flush truncate. If a legacy database has both, the
   resurrected records are renumbered as new writes.
+- **The leader persists before it replicates.** It syncs each batch to its own log
+  before sending it; asynchronous leader persistence is not implemented. At most one
+  append carrying entries is in flight per follower; a wider window is not
+  implemented. Committed entries are applied one index at a time in the event loop,
+  and snapshots, flushes and compactions run there too.
+- **No linearizability checker.** Read and write ordering is covered by tests only.
+- **Unexplained tail latency.** The latency above p99 at 16 clients is unexplained;
+  see the caveats in the README's [Results](README.md#results).
 - **No distributed range scans.** Embedded range scans exist, but the network
   interface intentionally exposes only point operations in the MVP.
 - **No compression.** All bytes are stored verbatim.

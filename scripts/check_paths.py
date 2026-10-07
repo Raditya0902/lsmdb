@@ -12,9 +12,11 @@ What it checks, for each file given with --file (README.md by default):
     resolved from the repository root.
     - A glob, such as db/replica_*, must match at least one file.
     - A bare file name must exist somewhere in the repository.
+    - A path with a line reference, such as internal/raft/node.go:155-163, must
+      exist and have at least that many lines.
     - Absolute paths and HTTP endpoints, such as /mnt/bench or /metrics, are not
-      repository paths and are skipped, as are the file extensions in
-      NOT_PATHS.
+      repository paths and are skipped, as are the file extensions, units and
+      names listed in NOT_PATHS.
   - Paths under scripts/, cmd/, benchmarks/, api/ and deploy/ inside code
     blocks, from the repository root.
   - The target of every "go run" command, in prose or in code blocks, from the
@@ -40,7 +42,12 @@ from typing import List, Set, Tuple
 NOT_PATHS = {
     ".pb.go": "file extension",
     ".proto": "file extension",
+    "appends/entry": "metric name",
+    "ops/s": "unit",
+    "runs/": "directory under each bench_compare -work directory, outside the repository",
 }
+# A path followed by a line reference, such as internal/raft/node.go:155-163.
+LINE_REFERENCE = re.compile(r"^(?P<path>.+\.\w+):(?P<first>\d+)(?:-(?P<last>\d+))?$")
 PATH_EXTENSIONS = r"\.(go|md|json|sh|proto|yml|yaml|txt)$"
 
 missing: List[str] = []
@@ -109,6 +116,8 @@ def check_backticks(prose: str) -> None:
             print(f"skip    {token}  (absolute path or endpoint, not a repository path)")
         elif token in NOT_PATHS:
             print(f"skip    {token}  ({NOT_PATHS[token]})")
+        elif LINE_REFERENCE.match(token):
+            check_line_reference(token)
         elif "*" in token:
             matches = glob.glob(token)
             report(bool(matches), token, f"glob: {len(matches)} files")
@@ -117,6 +126,17 @@ def check_backticks(prose: str) -> None:
             report(bool(matches), token, "found at " + ", ".join(matches) if matches else "not found")
         else:
             report(os.path.exists(token.rstrip("/")), token)
+
+
+def check_line_reference(token: str) -> None:
+    match = LINE_REFERENCE.match(token)
+    path, last = match.group("path"), int(match.group("last") or match.group("first"))
+    if not os.path.isfile(path):
+        report(False, token, "file not found")
+        return
+    with open(path) as f:
+        lines = sum(1 for _ in f)
+    report(last <= lines, token, f"{path} has {lines} lines")
 
 
 def check_code_blocks(blocks: List[str]) -> None:
